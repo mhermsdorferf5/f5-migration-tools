@@ -26,6 +26,68 @@ class bigip_obj:
     def __repr__(self):
         return f"bigip_obj(name='{self.name}', description='{self.description}')"
 
+class networkProfile:
+    description = "LTM Network Profile"
+
+    def __init__(self, name, type):
+        self.name = f5_sanitize(name)
+        self.type = type 
+        self.timeout = 300
+        self.partition = "Common"
+        self.datagramLoadLalancing = "disabled"
+        self.snat = "enabled"
+
+    @property
+    def name(self):
+        return self._name
+    @name.setter
+    def name(self, value):
+        self._name = f5_sanitize(value)
+
+    @property
+    def type(self):
+        return self._type
+    @type.setter
+    def type(self, value):
+        _valid_types = ["tcp", "udp", "fastl4"]
+        if value in _valid_types:
+            self._type = value
+        else:
+            self._type = "tcp"
+
+    @property
+    def timeout(self):
+        return self._timeout
+    @timeout.setter
+    def timeout(self, value):
+        if value >= 1 and value <= 86400:
+            self._timeout = value
+        else:
+            self._timeout = 300
+
+    def __str__(self):
+        return f"bigip_monitor(name={self.name}, type={self.type}"
+    def __repr__(self):
+        return f"bigip_monitor(name={self.name}, type={self.type}"
+    def tmos_obj(self):
+        match self.type:
+            case "tcp":
+                return f"""ltm profile {self.type} /{self.partition}/{self.name} {{
+    defaults-from f5-tcp-progressive
+    idle-timeout {str(self.timeout)}
+}}"""
+            case "udp": 
+                return f"""ltm profile {self.type} /{self.partition}/{self.name} {{
+    defaults-from udp
+    idle-timeout {str(self.timeout)}
+    datagram-load-balancing {self.datagramLoadLalancing}
+}}"""
+            case "fastl4": 
+                return f"""ltm profile {self.type} /{self.partition}/{self.name} {{
+    defaults-from fastL4
+    idle-timeout {str(self.timeout)}
+}}"""
+
 class monitor:
     description = "LTM Monitor"
 

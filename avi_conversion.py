@@ -1,61 +1,9 @@
 #!/bin/env python3
 
-################################################################################
-### avi2bigip.py
-#
-# Description:
-# Creates BIG-IP config from Avi configuration
-# 
-# Example Usage:
-# python3 avi2bigip.py --avi-json <avi-config.json>
-#
-# Requirements:
-#     python3 with requests & json libs.
-#
-# Generated Configuration Requires: BIG-IP LTM version 17.1 or later.
-#
-# Author: Mark Hermsdorfer <m.hermsdorfer@f5.com>
-# Version: 1.0
-# Version History:
-# v1.0: Initial Version.
-#
-# (c) Copyright 2024-2025 F5 Networks, Inc.
-#
-# This software is confidential and may contain trade secrets that are the
-# property of F5 Networks, Inc. No part of the software may be disclosed
-# to other parties without the express written consent of F5 Networks, Inc.
-# It is against the law to copy the software. No part of the software may
-# be reproduced, transmitted, or distributed in any form or by any means,
-# electronic or mechanical, including photocopying, recording, or information
-# storage and retrieval systems, for any purpose without the express written
-# permission of F5 Networks, Inc. Our services are only available for legal
-# users of the program, for instance in the event that we extend our services
-# by offering the updating of files via the Internet.
-#
-# DISCLAIMER:
-# THIS SOFTWARE IS PROVIDED "AS IS" AND ANY EXPRESSED OR IMPLIED WARRANTIES,
-# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
-# AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL F5
-# NETWORKS OR ANY CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
-# OR BUSINESS INTERRUPTION), HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
-# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
-# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
-# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# IMPORTANT NOTE: Any use of this software implies acceptance of the terms as
-# detailed above. If you do not agree to the terms as detailed above DO NOT
-# USE THE SOFTWARE!
-#
-################################################################################
-
-
 import sys
 import json
 from types import SimpleNamespace
 import f5_objects
-import avi_conversion
 from urllib.parse import urlparse, parse_qs
 import pprintpp
 import re
@@ -71,7 +19,7 @@ class avi_tenant:
         self.f5_monitors = []
         self.f5_virtuals = []
         self.f5_apps = []
-        self.f5_profiles = []
+        self.f5_profile = []
     def __repr__(self):
         virtualString= "[ "
         for virtual in self.f5_virtuals:
@@ -152,7 +100,48 @@ for vrf in avi_config.VrfContext:
 #pprintpp.pprint(avi_vrfs)
 #pprintpp.pprint(avi_tenants)
 
-for monitor in avi_config.HealthMonitor:
+def avi2bigip_network_profile(aviNetworkProfile):
+    tenantName =  f5_objects.f5_sanitize(getRefName(aviNetworkProfile.tenant_ref))
+    snat = "enabled"
+    match aviNetworkProfile.profile.type:
+        case "PROTOCOL_TYPE_UDP_FAST_PATH":
+            timeout = int(aviNetworkProfile.profile.udp_fast_path_profile.session_idle_timeout)
+            if aviNetworkProfile.profile.udp_fast_path_profile.per_pkt_loadbalance:
+                type = "udp"
+            else:
+                type = "fastl4"
+            if aviNetworkProfile.profile.udp_fast_path_profile.snat == False:
+                snat = "disabled"
+        case "PROTOCOL_TYPE_TCP_FAST_PATH":
+            type = "fastl4"
+            timeout = int(aviNetworkProfile.profile.tcp_fast_path_profile.session_idle_timeout)
+        case "PROTOCOL_TYPE_TCP_PROXY":
+            type = "tcp"
+            timeout = int(aviNetworkProfile.profile.tcp_proxy_profile.idle_connection_timeout)
+        case "PROTOCOL_TYPE_UDP_PROXY":
+            type = "udp"
+            timeout = int(aviNetworkProfile.profile.udp_proxy_profile.idle_connection_timeout)
+        case "PROTOCOL_TYPE_SCTP_PROXY":
+            type = "sctp"
+            timeout = int(aviNetworkProfile.profile.sctp_proxy_profile.idle_timeout)
+        case _:
+            log_warning("Network Profile: " + aviNetworkProfile.name + " Don't know how to handle type: " + aviNetworkProfile.profile.type)
+    
+    f5_profile = f5_objects.networkProfile(aviNetworkProfile.name, type) 
+    f5_profile.timeout = timeout
+    f5_profile.partition = tenantName
+    if aviNetworkProfile.profile.type == "PROTOCOL_TYPE_UDP_FAST_PATH" and type == "fastl4":
+        f5_profile.datagramLoadBalancing = "enabled"
+        # snat's don't exist in F5 profiles.... but oneoff handling.
+        if snat == "disabled":
+            f5_profile.snat = "disabled"
+    if tenantName == "admin":
+        f5_profile.partition = "Common"
+    return f5_profile
+
+
+
+def avi2bigip_monitor(monitor):
     tenantName =  f5_objects.f5_sanitize(getRefName(monitor.tenant_ref))
 
     match monitor.type:
@@ -388,20 +377,8 @@ for virtual in avi_config.VirtualService:
     #if poolMatchCount != 1 and default_pool != "none":
     #    log_warning("Virtual: " + virtual.name + " uses pool: " + default_pool + " but there's more than one object with the same name count: " + str(poolMatchCount) + "." )
 
-    # Figure out Profiles:
-    # Network Profile first...
-    networkProfileName = getRefName(virtual.network_profile_ref)
-    networkProfileTenant = f5_objects.f5_sanitize(getRefTenant(virtual.network_profile_ref))
-
-    for networkProfile in avi_config.NetworkProfile:
-        if networkProfile.name == networkProfileName and f5_objects.f5_sanitize(getRefName(networkProfile.tenant_ref)) == networkProfileTenant:
-            print(f"DEBUG: networkProfile: {networkProfileName} found in networkProfileTenant {networkProfileTenant}.")
-            f5_network_profile = avi_conversion.avi2bigip_network_profile(networkProfile)
-
     f5_virtual = f5_objects.virtual(virtual.name, destination, default_pool)
     f5_virtual.routeDomain = vrfName
-
-    f5_virtual.profilesAll = [f"/{f5_network_profile.partition}/{f5_network_profile.name}"]
 
     if tenantName != "admin":
         f5_virtual.partition = tenantName
@@ -411,13 +388,6 @@ for virtual in avi_config.VirtualService:
         if tenant.name == tenantName:
             tenant.f5_virtuals.append(f5_virtual)
             addedToTenant = 1
-        if tenant.name == networkProfileTenant:
-            profileExists = 0
-            for profile in tenant.f5_profiles:
-                if profile.name == f5_network_profile.name:
-                    profileExists = 1
-            if profileExists == 0:
-                tenant.f5_profiles.append(f5_network_profile)
     if addedToTenant == 0:
         log_error("Virtual: " + virtual.name + " not added to any tenant, no tenant found for: " + tenant.name)
         addedToTenant = 0
@@ -426,11 +396,13 @@ for virtual in avi_config.VirtualService:
     del tenantName, addedToTenant, vrfName, destination, default_pool, f5_virtual, vsVipName, ip, mask, vsvip
 
 print("Avi Tenants:")
-
 pprintpp.pprint(avi_tenants)
 
 f = open(args.bigipConfigFile, "w")
+
 for tenant in avi_tenants:
+    if args.aviTenant != "all" and args.aviTenant != tenant.name:
+        continue
     if tenant.name == "admin":
         tenant.name = "Common"
     f.write(f"################################################################################\n")
@@ -446,9 +418,6 @@ for tenant in avi_tenants:
     f.write(f"### Tenant: {tenant.name}\tPools ###\n")
     for pool in tenant.f5_pools:
         f.write(pool.tmos_obj() + "\n")
-    f.write(f"### Tenant: {tenant.name}\tProfiles ###\n")
-    for profile in tenant.f5_profiles:
-        f.write(profile.tmos_obj() + "\n")
     f.write(f"### Tenant: {tenant.name}\tVirtual Servers ###\n")
     for virtual in tenant.f5_virtuals:
         f.write(virtual.tmos_obj() + "\n")
