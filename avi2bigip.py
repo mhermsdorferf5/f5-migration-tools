@@ -55,7 +55,6 @@ import sys
 import json
 from types import SimpleNamespace
 import f5_objects
-import avi_conversion
 from urllib.parse import urlparse, parse_qs
 import pprintpp
 import re
@@ -110,49 +109,47 @@ def getRefCloud(url):
     name =  ref_querystring["cloud"][0]
     return name
 
-parser = argparse.ArgumentParser(description="Convert Avi JSON Configuration to BIG-IP Configuration")
-parser.add_argument("aviJsonFile", action="store", help="Avi JSON Configuration File")
-parser.add_argument("-c", "--avi-cloud", action="store", dest="aviCloud", default="VM-Default-Cloud")
-parser.add_argument("-t", "--avi-tenant", action="store", dest="aviTenant", default="all")
-parser.add_argument("-b", "--bigip-conf", action="store", dest="bigipConfigFile", default="avi_bigip_for_merge.conf")
-args = parser.parse_args()
+def avi2bigip_network_profile(aviNetworkProfile):
+    tenantName =  f5_objects.f5_sanitize(getRefName(aviNetworkProfile.tenant_ref))
+    snat = "enabled"
+    match aviNetworkProfile.profile.type:
+        case "PROTOCOL_TYPE_UDP_FAST_PATH":
+            timeout = int(aviNetworkProfile.profile.udp_fast_path_profile.session_idle_timeout)
+            if aviNetworkProfile.profile.udp_fast_path_profile.per_pkt_loadbalance:
+                type = "udp"
+            else:
+                type = "fastl4"
+            if aviNetworkProfile.profile.udp_fast_path_profile.snat == False:
+                snat = "disabled"
+        case "PROTOCOL_TYPE_TCP_FAST_PATH":
+            type = "fastl4"
+            timeout = int(aviNetworkProfile.profile.tcp_fast_path_profile.session_idle_timeout)
+        case "PROTOCOL_TYPE_TCP_PROXY":
+            type = "tcp"
+            timeout = int(aviNetworkProfile.profile.tcp_proxy_profile.idle_connection_timeout)
+        case "PROTOCOL_TYPE_UDP_PROXY":
+            type = "udp"
+            timeout = int(aviNetworkProfile.profile.udp_proxy_profile.idle_connection_timeout)
+        case "PROTOCOL_TYPE_SCTP_PROXY":
+            type = "sctp"
+            timeout = int(aviNetworkProfile.profile.sctp_proxy_profile.idle_timeout)
+        case _:
+            log_warning("Network Profile: " + aviNetworkProfile.name + " Don't know how to handle type: " + aviNetworkProfile.profile.type)
+    
+    f5_profile = f5_objects.networkProfile(aviNetworkProfile.name, type) 
+    f5_profile.timeout = timeout
+    f5_profile.partition = tenantName
+    if aviNetworkProfile.profile.type == "PROTOCOL_TYPE_UDP_FAST_PATH" and type == "fastl4":
+        f5_profile.datagramLoadBalancing = "enabled"
+        # snat's don't exist in F5 profiles.... but oneoff handling.
+        if snat == "disabled":
+            f5_profile.snat = "disabled"
+    if tenantName == "admin":
+        f5_profile.partition = "Common"
+    return f5_profile
 
-avi_config_file = open(args.aviJsonFile, "r")
-avi_config = json.loads(avi_config_file.read(), object_hook=lambda d: SimpleNamespace(**d))
-avi_config_file.close()
 
-avi_tenants = []
-f5_partitions = []
-f5_routeDomains = []
-routeDomainCount = 10
-
-for tenant in avi_config.Tenant:
-    f5_partition = f5_objects.partition(tenant.name)
-    avi_tenant_obj   = avi_tenant(tenant.name)
-    if hasattr(tenant, 'description'): 
-        f5_partition.description = tenant.description
-        avi_tenant_obj.description = tenant.description
-    f5_partitions.append(f5_partition)
-    avi_tenants.append(avi_tenant_obj)
-
-for vrf in avi_config.VrfContext:
-    cloud = getRefName(vrf.cloud_ref)
-    if cloud != args.aviCloud:
-        continue
-    vrfTenantName =  getRefName(vrf.tenant_ref)
-    f5_routeDomain = f5_objects.routeDomain(vrf.name, routeDomainCount)
-    routeDomainCount = routeDomainCount + 10
-    if hasattr(vrf, 'description'): 
-        f5_routeDomain.description = vrf.description
-    for tenant in avi_tenants:
-        if tenant.name == vrf.name:
-            tenant.defaultRouteDomain = f5_routeDomain.id
-    f5_routeDomains.append(f5_routeDomain)
-
-#pprintpp.pprint(avi_vrfs)
-#pprintpp.pprint(avi_tenants)
-
-for monitor in avi_config.HealthMonitor:
+def avi2bigip_monitor(monitor):
     tenantName =  f5_objects.f5_sanitize(getRefName(monitor.tenant_ref))
 
     match monitor.type:
@@ -169,9 +166,11 @@ for monitor in avi_config.HealthMonitor:
         case "HEALTH_MONITOR_PING":
             type = "gateway_icmp"
         case "HEALTH_MONITOR_EXTERNAL":
-            log_warning("Monitor: " + monitor.name + " Don't know how to handle lb_algorithm: " + monitor.type)
+            log_error("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
+            raise
         case _:
-            log_warning("Monitor: " + monitor.name + " Don't know how to handle lb_algorithm: " + monitor.type)
+            log_error("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
+            raise
 
     f5_monitor = f5_objects.monitor(monitor.name, type)
 
@@ -223,32 +222,16 @@ for monitor in avi_config.HealthMonitor:
         f5_monitor.send = send_str
         f5_monitor.recv = recv_str 
         del monitor_attrs, send_str, type, recv_code, recv_str, num_subs
+    return f5_monitor
 
-    addedToTenant = 0
-    for tenant in avi_tenants:
-        if tenant.name == tenantName:
-            tenant.f5_monitors.append(f5_monitor)
-            addedToTenant = 1
-    if addedToTenant == 0:
-        log_error("Monitor: " + monitor.name + " not added to any tenant, no tenant found for: " + tenant.name)
-        addedToTenant = 0
-    
-    #cleanup vars:
-    del tenantName, addedToTenant, f5_monitor
-
-
-for pool in avi_config.Pool:
+def avi2bigip_pool(pool):
     tenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
     vrfName    =  getRefName(pool.vrf_ref)
     cloudName = getRefName(pool.cloud_ref)
-    if cloudName != args.aviCloud:
-        continue
     if pool.pool_type != "POOL_TYPE_GENERIC_APP":
         log_error("Pool: " + pool.name + " Don't know how to handle pool_type: " + pool.pool_type )
     if pool.append_port != "NEVER":
         log_error("Pool: " + pool.name + " Don't know how to handle append_port: " + pool.append_port)
-    
-    
 
     f5_members = []
     if hasattr(pool, 'servers'): 
@@ -317,33 +300,19 @@ for pool in avi_config.Pool:
     if tenantName != "admin":
         f5_pool.partition = tenantName
 
-    addedToTenant = 0
-    for tenant in avi_tenants:
-        if tenant.name == tenantName:
-            tenant.f5_pools.append(f5_pool)
-            addedToTenant = 1
-    if addedToTenant == 0:
-        log_error("Pool: " + pool.name + " not added to any tenant, no tenant found for: " + tenant.name)
-        addedToTenant = 0
+    return f5_pool
 
-    #cleanup vars:
-    del tenantName, addedToTenant, f5_pool, f5_members, vrfName
-
-for virtual in avi_config.VirtualService:
-    cloudName = getRefName(pool.cloud_ref)
-    if cloudName != args.aviCloud:
-        continue
-
+def avi2bigip_virtual(virtual):
     if virtual.type != "VS_TYPE_NORMAL":
         log_error("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
-        continue
+        raise
     tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
     #if pool.append_port != "NEVER":
     #    log_warning("Virtual: " + pool.name + " Don't know how to handle append_port: " + pool.append_port)
 
     if not hasattr(virtual, 'services'):
         log_warning("Virtual: " + virtual.name + " Don't know how to handle no services on VirtualService object." )
-        continue
+        raise
     if len(virtual.services) > 1:
         log_error("Virtual: " + virtual.name + " Don't know how to handle multiple services on VirtualService object." )
     if virtual.services[0].port != virtual.services[0].port_range_end:
@@ -393,10 +362,19 @@ for virtual in avi_config.VirtualService:
     networkProfileName = getRefName(virtual.network_profile_ref)
     networkProfileTenant = f5_objects.f5_sanitize(getRefTenant(virtual.network_profile_ref))
 
+    networkProfileFound = 0
     for networkProfile in avi_config.NetworkProfile:
         if networkProfile.name == networkProfileName and f5_objects.f5_sanitize(getRefName(networkProfile.tenant_ref)) == networkProfileTenant:
-            print(f"DEBUG: networkProfile: {networkProfileName} found in networkProfileTenant {networkProfileTenant}.")
-            f5_network_profile = avi_conversion.avi2bigip_network_profile(networkProfile)
+            f5_network_profile = avi2bigip_network_profile(networkProfile)
+            networkProfileFound += 1
+    
+    if networkProfileFound == 0:
+        print(f"ERROR: networkProfile: {networkProfileName} not found in networkProfileTenant {networkProfileTenant}.")
+        raise
+    if networkProfileFound > 1:
+        print(f"ERROR: Multiple network profiles found networkProfile: {networkProfileName} networkProfileTenant {networkProfileTenant}.")
+        raise
+
 
     f5_virtual = f5_objects.virtual(virtual.name, destination, default_pool)
     f5_virtual.routeDomain = vrfName
@@ -406,54 +384,201 @@ for virtual in avi_config.VirtualService:
     if tenantName != "admin":
         f5_virtual.partition = tenantName
 
-    addedToTenant = 0
+    return f5_virtual, f5_network_profile
+
+
+def loadAviConfigFile(filename) -> SimpleNamespace:
+    avi_config_file = open(filename, "r")
+    avi_config = json.loads(avi_config_file.read(), object_hook=lambda d: SimpleNamespace(**d))
+    avi_config_file.close()
+    return avi_config
+
+
+def writeBigIpConfig():
+    try:
+        f = open(args.bigipConfigFile, "w")
+    except:
+        log_error("ERROR: problem opening file for writing.")
+        raise
+
     for tenant in avi_tenants:
-        if tenant.name == tenantName:
-            tenant.f5_virtuals.append(f5_virtual)
-            addedToTenant = 1
-        if tenant.name == networkProfileTenant:
-            profileExists = 0
-            for profile in tenant.f5_profiles:
-                if profile.name == f5_network_profile.name:
-                    profileExists = 1
-            if profileExists == 0:
-                tenant.f5_profiles.append(f5_network_profile)
-    if addedToTenant == 0:
-        log_error("Virtual: " + virtual.name + " not added to any tenant, no tenant found for: " + tenant.name)
+        if tenant.name == "admin":
+            tenant.name = "Common"
+        f.write(f"################################################################################\n")
+        f.write(f"### Tenant: {tenant.name}\t###\n")
+        f.write(f"################################################################################\n")
+        if tenant.name != "Common":
+            for partition in f5_partitions:
+                if partition.name == tenant.name:
+                    f.write(partition.tmos_obj() + "\n")
+        f.write(f"### Tenant: {tenant.name}\tMonitors ###\n")
+        for monitor in tenant.f5_monitors:
+            f.write(monitor.tmos_obj() + "\n")
+        f.write(f"### Tenant: {tenant.name}\tPools ###\n")
+        for pool in tenant.f5_pools:
+            f.write(pool.tmos_obj() + "\n")
+        f.write(f"### Tenant: {tenant.name}\tProfiles ###\n")
+        for profile in tenant.f5_profiles:
+            f.write(profile.tmos_obj() + "\n")
+        f.write(f"### Tenant: {tenant.name}\tVirtual Servers ###\n")
+        for virtual in tenant.f5_virtuals:
+            f.write(virtual.tmos_obj() + "\n")
+    f.close()
+
+    return
+
+def main() -> int:
+
+    global avi_config
+    try:
+        avi_config = loadAviConfigFile(args.aviJsonFile)
+    except:
+        log_error("ERROR: problem loading Avi JSON Configuration.")
+        return 1
+
+    global avi_tenants
+    avi_tenants = []
+
+    global f5_partitions
+    f5_partitions = []
+
+    f5_routeDomains = []
+    routeDomainCount = 10
+    
+    for tenant in avi_config.Tenant:
+        f5_partition = f5_objects.partition(tenant.name)
+        avi_tenant_obj   = avi_tenant(tenant.name)
+        if tenant.name == "admin":
+            avi_tenant_obj.name = "Common"
+        if hasattr(tenant, 'description'): 
+            f5_partition.description = tenant.description
+            avi_tenant_obj.description = tenant.description
+        f5_partitions.append(f5_partition)
+        avi_tenants.append(avi_tenant_obj)
+    
+    for vrf in avi_config.VrfContext:
+        cloud = getRefName(vrf.cloud_ref)
+        if cloud != args.aviCloud:
+            continue
+        vrfTenantName =  getRefName(vrf.tenant_ref)
+        f5_routeDomain = f5_objects.routeDomain(vrf.name, routeDomainCount)
+        routeDomainCount = routeDomainCount + 10
+        if hasattr(vrf, 'description'): 
+            f5_routeDomain.description = vrf.description
+        for tenant in avi_tenants:
+            if tenant.name == vrf.name:
+                tenant.defaultRouteDomain = f5_routeDomain.id
+        f5_routeDomains.append(f5_routeDomain)
+    
+    #pprintpp.pprint(avi_vrfs)
+    #pprintpp.pprint(avi_tenants)
+    
+    for monitor in avi_config.HealthMonitor:
+        tenantName =  f5_objects.f5_sanitize(getRefName(monitor.tenant_ref))
+        if tenantName == "admin":
+            tenantName = "Common"
+    
+        try:
+            f5_monitor = avi2bigip_monitor(monitor)
+        except:
+            log_error("Monitor: " + monitor.name + " not able to be converted to bigip object")
+            continue
+    
         addedToTenant = 0
+        for tenant in avi_tenants:
+            if tenant.name == tenantName:
+                tenant.f5_monitors.append(f5_monitor)
+                addedToTenant = 1
+        if addedToTenant == 0:
+            log_error("Monitor: " + monitor.name + " not added to any tenant, no tenant found for: " + tenant.name)
+            addedToTenant = 0
+        
+        #cleanup vars:
+        del addedToTenant, f5_monitor, tenantName
+    
+    
+    for pool in avi_config.Pool:
+        tenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
+        if tenantName == "admin":
+            tenantName = "Common"
+        vrfName    =  getRefName(pool.vrf_ref)
+        cloudName = getRefName(pool.cloud_ref)
+        if cloudName != args.aviCloud:
+            continue
+        try:
+            f5_pool = avi2bigip_pool(pool)
+        except:
+            log_error("Pool: " + pool.name + " not able to be converted to bigip object")
+            continue
+        addedToTenant = 0
+        for tenant in avi_tenants:
+            if tenant.name == tenantName:
+                tenant.f5_pools.append(f5_pool)
+                addedToTenant = 1
+        if addedToTenant == 0:
+            log_error("Pool: " + pool.name + " not added to any tenant, no tenant found for: " + tenant.name)
+            addedToTenant = 0
+    
+        #cleanup vars:
+        del tenantName, addedToTenant, f5_pool, vrfName, cloudName
+    
+    for virtual in avi_config.VirtualService:
+        tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
+        if tenantName == "admin":
+            tenantName = "Common"
+        cloudName = getRefName(virtual.cloud_ref)
+        if cloudName != args.aviCloud:
+            continue
+        try:
+            f5_virtual, f5_network_profile = avi2bigip_virtual(virtual)
+        except:
+            log_error("virtual: " + virtual.name + " not able to be converted to bigip object")
+            continue
+        addedToTenant = 0
+        for tenant in avi_tenants:
+            if tenant.name == tenantName:
+                tenant.f5_virtuals.append(f5_virtual)
+                addedToTenant = 1
+            print(f"DEBUG: TESTING Network Profile: {f5_network_profile.name} with Partition: {f5_network_profile.partition} against tenant: {tenant.name}")
+            if tenant.name == f5_network_profile.partition:
+                print(f"DEBUG: Adding Network Profile: {f5_network_profile.name} to tenant: {tenant.name}")
+                profileExists = 0
+                for profile in tenant.f5_profiles:
+                    if profile.name == f5_network_profile.name:
+                        profileExists = 1
+                if profileExists == 0:
+                    tenant.f5_profiles.append(f5_network_profile)
+        if addedToTenant == 0:
+            log_error("Virtual: " + virtual.name + " not added to any tenant, no tenant found for: " + tenant.name)
+            addedToTenant = 0
+    
+        #cleanup vars:
+        del tenantName, addedToTenant, f5_virtual
+    
+    #print("Avi Tenants:")
+    #pprintpp.pprint(avi_tenants)
 
-    #cleanup vars:
-    del tenantName, addedToTenant, vrfName, destination, default_pool, f5_virtual, vsVipName, ip, mask, vsvip
+    try: 
+        writeBigIpConfig()
+    except:
+        log_error("ERROR: problem writing BigIP Config.")
+        return 1
 
-print("Avi Tenants:")
-
-pprintpp.pprint(avi_tenants)
-
-f = open(args.bigipConfigFile, "w")
-for tenant in avi_tenants:
-    if tenant.name == "admin":
-        tenant.name = "Common"
-    f.write(f"################################################################################\n")
-    f.write(f"### Tenant: {tenant.name}\t###\n")
-    f.write(f"################################################################################\n")
-    if tenant.name != "Common":
-        for partition in f5_partitions:
-            if partition.name == tenant.name:
-                f.write(partition.tmos_obj() + "\n")
-    f.write(f"### Tenant: {tenant.name}\tMonitors ###\n")
-    for monitor in tenant.f5_monitors:
-        f.write(monitor.tmos_obj() + "\n")
-    f.write(f"### Tenant: {tenant.name}\tPools ###\n")
-    for pool in tenant.f5_pools:
-        f.write(pool.tmos_obj() + "\n")
-    f.write(f"### Tenant: {tenant.name}\tProfiles ###\n")
-    for profile in tenant.f5_profiles:
-        f.write(profile.tmos_obj() + "\n")
-    f.write(f"### Tenant: {tenant.name}\tVirtual Servers ###\n")
-    for virtual in tenant.f5_virtuals:
-        f.write(virtual.tmos_obj() + "\n")
-f.close()
+    return 0
 
 
 
 
+# Main
+if __name__ == '__main__':
+    # ArgeParse stuff:
+    parser = argparse.ArgumentParser(description="Convert Avi JSON Configuration to BIG-IP Configuration")
+    parser.add_argument("aviJsonFile", action="store", help="Avi JSON Configuration File")
+    parser.add_argument("-c", "--avi-cloud", action="store", dest="aviCloud", default="VM-Default-Cloud")
+    parser.add_argument("-t", "--avi-tenant", action="store", dest="aviTenant", default="all")
+    parser.add_argument("-b", "--bigip-conf", action="store", dest="bigipConfigFile", default="avi_bigip_for_merge.conf")
+    global args
+    args = parser.parse_args()
+
+    # Call main function: 
+    sys.exit(main())  
