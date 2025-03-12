@@ -133,7 +133,7 @@ def avi2bigip_http_profile(aviApplicationProfile):
 
     tenantName =  f5_objects.f5_sanitize(getRefName(aviApplicationProfile.tenant_ref))
 
-    f5_profile = f5_objects.ClientSSLProfile(aviApplicationProfile.name) 
+    f5_profile = f5_objects.httpProfile(aviApplicationProfile.name) 
     f5_profile.partition = tenantName
 
     if hasattr(aviApplicationProfile, 'http_profile'):
@@ -150,6 +150,8 @@ def avi2bigip_http_profile(aviApplicationProfile):
             case "REPLACE_XFF_HEADERS":
                 f5_profile.insertXForwardedFor = "enabled"
 
+    if tenantName == "admin":
+        f5_profile.partition = "Common"
     return f5_profile
 
 def avi2bigip_clientssl_profile(aviSSLProfile, aviSSLKeyAndCertificate):
@@ -219,15 +221,8 @@ def avi2bigip_clientssl_profile(aviSSLProfile, aviSSLKeyAndCertificate):
         f5_profile.chainFile = chain
         #print(f"DEBUG: ChainFileName: {f5_profile.chainFileName} Chain: {f5_profile.chainFile}") 
 
-
-
-    #if aviNetworkProfile.profile.type == "PROTOCOL_TYPE_UDP_FAST_PATH" and type == "fastl4":
-    #    f5_profile.datagramLoadBalancing = "enabled"
-    #    # snat's don't exist in F5 profiles.... but oneoff handling.
-    #    if snat == "disabled":
-    #        f5_profile.snat = "disabled"
-    #if tenantName == "admin":
-    #    f5_profile.partition = "Common"
+    if tenantName == "admin":
+        f5_profile.partition = "Common"
     return f5_profile
 
 def avi2bigip_network_profile(aviNetworkProfile):
@@ -532,8 +527,16 @@ def avi2bigip_virtual(virtual):
                 http_profile = avi2bigip_http_profile(aviApplicationProfile)
             except Exception as e:
                 log_error("Application Profile: " + aviApplicationProfile.name + " not able to be converted to bigip object " + str(e))
+
             if aviApplicationProfile.http_profile.compression_profile.compression is True:
                 log_warning("Application Profile: " + aviApplicationProfile.name + " Don't know how to handle compression." )
+
+            if aviApplicationProfile.http_profile.use_true_client_ip is True:
+                f5_virtual.snat = False
+                f5_virtual.snat_type = "none"
+            else:
+                f5_virtual.snat = True
+                f5_virtual.snat_type = "automap"
             
             profiles.append(http_profile)
             f5_virtual.profilesAll.append(f"/{http_profile.partition}/{http_profile.name}")
@@ -676,7 +679,7 @@ def writeSslFiles():
         raise Exception("ERROR: problem opening file for writing. " + str(e))
 
     for partition in partitionList:
-        importScriptFile.write(f"tmsh create auth partition /{partition}\n")
+        importScriptFile.write(f"tmsh create auth partition {partition}\n")
 
     importScriptFile.write(f"{importCommands}\n")
     importScriptFile.close()
@@ -790,20 +793,36 @@ def main() -> int:
             log_error("virtual: " + virtual.name + " not able to be converted to bigip object " + str(e))
             continue
         addedToTenant = 0
+
+        # we get one vip back, and we know what partition it goes in, so simply add it...
         for tenant in avi_tenants:
             if tenant.name == tenantName:
                 tenant.f5_virtuals.append(f5_virtual)
-                addedToTenant = 1
-            for profile in profiles:
-                #print(f"DEBUG: TESTING Profile: {profile.name} with Partition: {profile.partition} against tenant: {tenant.name}")
+                addedToTenant += 1
+
+        # we get multiple profiles back, and need to add them to the correct tenant/partition.
+        for profile in profiles:
+            #print(f"DEBUG: TESTING Profile: {profile.name} with Partition: {profile.partition} against tenant: {tenant.name}")
+            profileAddedToTenant = 0
+            for tenant in avi_tenants:
+                if tenant.name == "admin":
+                    tenant.name = "Common"
                 if tenant.name == profile.partition:
-                    #print(f"DEBUG: Adding Profile: {profile.name} to tenant: {tenant.name}")
+                    #print(f"DEBUG: Adding Profile: {profile.name} {profile.type} to tenant: {tenant.name}")
                     profileExists = 0
-                    for profile in tenant.f5_profiles:
-                        if profile.name == profile.name:
+                    # Check if the profile alread exists in the tenant...
+                    for testProfile in tenant.f5_profiles:
+                        if testProfile.name == profile.name:
                             profileExists = 1
+                            profileAddedToTenant += 1
+                    # if not add it...
                     if profileExists == 0:
                         tenant.f5_profiles.append(profile)
+                        profileAddedToTenant += 1
+            if profileAddedToTenant == 0:
+                log_error("Profile: " + profile.name + " not added to any tenant, no tenant found for: " + profile.partition)
+                profileAddedToTenant = 0
+
         if addedToTenant == 0:
             log_error("Virtual: " + virtual.name + " not added to any tenant, no tenant found for: " + tenant.name)
             addedToTenant = 0

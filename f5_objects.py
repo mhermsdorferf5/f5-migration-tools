@@ -55,10 +55,6 @@ class httpProfile:
     def __repr__(self):
         return f"bigip_httpProfile(name={self.name}"
     def tmos_obj(self):
-        optionsStr = ""
-        for option in self.options:
-            optionsStr += f"{option} "
-        certKeyChainName = re.sub('.crt', '', self.certFileName)
         return f"""ltm profile http /{self.partition}/{self.name} {{
     defaults-from http
     proxy-type reverse
@@ -383,6 +379,10 @@ class virtual(bigip_obj):
         self.profilesServerSide = [ ]
         self.partition = "Common"
         self.mask = "255.255.255.255"
+        self.snat = True
+        self.snatType = "automap"
+        self.snatPoolName = ""
+
 
     @property
     def name(self):
@@ -411,8 +411,16 @@ class virtual(bigip_obj):
             profiles += f"        {profile} {{context clientside}}\n"
         for profile in self.profilesServerSide:
             profiles += f"        {profile} {{context serverside}}\n"
+        snatConfig = ""
+        if self.snat:
+            if self.snatType == "automap":
+                snatConfig = f"""
+    source-address-translation {{
+        type automap
+    }}"""
+                
         return f"""ltm virtual /{self.partition}/{self.name} {{
     destination {self.destination}
     pool {self.default_pool}
-    profiles {{ {profiles}    }}
+    profiles {{ {profiles}    }} {snatConfig}
 }}"""
