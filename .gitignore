@@ -1,5 +1,11 @@
 # output files:
-avi_bigip_for_merge.conf
+*.conf
+*.log
+sslFiles/
+*.pem
+*.key
+*.csr
+*.crt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
