@@ -88,7 +88,6 @@ def usage ():
     print("Usage:")
     print("%s --avi-json <AviConfig.json> ")
 
-
 def log_error(logmessage):
     logmessage = str("ERROR: " + logmessage)
     print(logmessage, file=sys.stderr)
@@ -130,7 +129,28 @@ def generateCertKeyFile(name, obj, type):
     if type == "key":
         f.write(obj.key)
 
+def avi2bigip_http_profile(aviApplicationProfile):
 
+    tenantName =  f5_objects.f5_sanitize(getRefName(aviApplicationProfile.tenant_ref))
+
+    f5_profile = f5_objects.ClientSSLProfile(aviApplicationProfile.name) 
+    f5_profile.partition = tenantName
+
+    if hasattr(aviApplicationProfile, 'http_profile'):
+        if aviApplicationProfile.http_profile.connection_multiplexing_enabled is False:
+            f5_profile.oneconnectTransformations = "enabled"
+        # Only set max header if it's above F5 Default of 64
+        if aviApplicationProfile.http_profile.max_header_count > 64:
+            f5_profile.maxHeaderCount = aviApplicationProfile.http_profile.max_header_count
+        match aviApplicationProfile.http_profile.xff_update:
+            case "ADD_NEW_XFF_HEADER":
+                f5_profile.insertXForwardedFor = "enabled"
+            case "APPEND_TO_THE_XFF_HEADER":
+                f5_profile.insertXForwardedFor = "enabled"
+            case "REPLACE_XFF_HEADERS":
+                f5_profile.insertXForwardedFor = "enabled"
+
+    return f5_profile
 
 def avi2bigip_clientssl_profile(aviSSLProfile, aviSSLKeyAndCertificate):
 
@@ -458,7 +478,14 @@ def avi2bigip_virtual(virtual):
     #if poolMatchCount != 1 and default_pool != "none":
     #    log_warning("Virtual: " + virtual.name + " uses pool: " + default_pool + " but there's more than one object with the same name count: " + str(poolMatchCount) + "." )
 
-    # Figure out Profiles:
+    # Create F5 virtual object and Figure out Profiles:
+    f5_virtual = f5_objects.virtual(virtual.name, destination, default_pool)
+    f5_virtual.routeDomain = vrfName
+    if tenantName != "admin":
+        f5_virtual.partition = tenantName
+
+    profiles = []
+
     # Network Profile first...
     networkProfileName = getRefName(virtual.network_profile_ref)
     networkProfileTenant = f5_objects.f5_sanitize(getRefTenant(virtual.network_profile_ref))
@@ -478,17 +505,38 @@ def avi2bigip_virtual(virtual):
     if networkProfileFound > 1:
         #print(f"ERROR: Multiple network profiles found networkProfile: {networkProfileName} networkProfileTenant {networkProfileTenant}.")
         raise Exception(f"ERROR: Multiple network profiles found networkProfile: {networkProfileName} networkProfileTenant {networkProfileTenant}.")
-
-    f5_virtual = f5_objects.virtual(virtual.name, destination, default_pool)
-    f5_virtual.routeDomain = vrfName
-    profiles = []
     
     profiles.append(f5_network_profile)
     f5_virtual.profilesAll.append(f"/{f5_network_profile.partition}/{f5_network_profile.name}")
 
-    if tenantName != "admin":
-        f5_virtual.partition = tenantName
+    # Now Application Profile, if it has one.
+    if hasattr(virtual, 'application_profile_ref'):
+        applicationProfileName = getRefName(virtual.application_profile_ref)
+        applicationProfileTenant = f5_objects.f5_sanitize(getRefTenant(virtual.application_profile_ref))
 
+        applicationProfileFound = 0
+        for applicationProfile in avi_config.ApplicationProfile:
+            if applicationProfile.name == applicationProfileName and f5_objects.f5_sanitize(getRefName(applicationProfile.tenant_ref)) == applicationProfileTenant:
+                aviApplicationProfile = applicationProfile
+                applicationProfileFound += 1
+
+        if applicationProfileFound == 0:
+            #log_error(f"ERROR: applicationProfile: {applicationProfileName} not found in applicationProfileTenant {applicationProfileTenant}.")
+            raise Exception(f"ERROR: applicationProfile: {applicationProfileName} not found in applicationProfileTenant {applicationProfileTenant}.")
+        if applicationProfileFound > 1:
+            #log_error(f"ERROR: Multiple application profiles found applicationProfile: {applicationProfileName} applicationProfileTenant {applicationProfileTenant}.")
+            raise Exception(f"ERROR: Multiple application profiles found applicationProfile: {applicationProfileName} applicationProfileTenant {applicationProfileTenant}.")
+
+        if aviApplicationProfile.type == "APPLICATION_PROFILE_TYPE_HTTP":
+            try:
+                http_profile = avi2bigip_http_profile(aviApplicationProfile)
+            except Exception as e:
+                log_error("Application Profile: " + aviApplicationProfile.name + " not able to be converted to bigip object " + str(e))
+            if aviApplicationProfile.http_profile.compression_profile.compression is True:
+                log_warning("Application Profile: " + aviApplicationProfile.name + " Don't know how to handle compression." )
+            
+            profiles.append(http_profile)
+            f5_virtual.profilesAll.append(f"/{http_profile.partition}/{http_profile.name}")
 
     # Now SSL Profile, if it has one.
     if hasattr(virtual, 'ssl_profile_ref'):
@@ -577,12 +625,9 @@ def writeSslFiles():
         #log_error(f"ERROR: problem creating SSL File Directory: {args.sslFileDir} " + e)
         raise Exception(f"ERROR: problem creating SSL File Directory: {args.sslFileDir} " + str(e))
 
-    # Open file for writing import commands to:
-    try:
-        importScriptFile = open(f"{args.sslFileDir}/avi2bigip_ssl_file_import.sh", "w")
-    except Exception as e:
-        #log_error("ERROR: problem opening file for writing. " + e)
-        raise Exception("ERROR: problem opening file for writing. " + str(e))
+    # string of import commands to append tmsh commands to...    
+    importCommands = ""
+    partitionList = []
     
     # Write out SSL Files:
     for tenant in avi_tenants:
@@ -590,6 +635,8 @@ def writeSslFiles():
             tenant.name = "Common"
         for profile in tenant.f5_profiles:
             if profile.type == "client-ssl":
+                if profile.partition not in partitionList:
+                    partitionList.append(profile.partition)
                 if profile.certFileName != "":
                     try:
                         f = open(f"{args.sslFileDir}/{profile.partition}___{profile.certFileName}", "w")
@@ -597,7 +644,8 @@ def writeSslFiles():
                         #log_error("ERROR: problem opening file for writing. " + e)
                         raise Exception("ERROR: problem opening file for writing. " + str(e))
                     f.write(profile.certFile)
-                    importScriptFile.write(f"tmsh install sys crypto cert /{profile.partition}/{profile.certFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.certFileName} }}\n")
+                    #importScriptFile.write(f"tmsh install sys crypto cert /{profile.partition}/{profile.certFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.certFileName} }}\n")
+                    importCommands += f"tmsh install sys crypto cert /{profile.partition}/{profile.certFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.certFileName} }}\n"
                     f.close()
                 if profile.keyFileName != "":
                     try:
@@ -606,7 +654,8 @@ def writeSslFiles():
                         #log_error("ERROR: problem opening file for writing. " + e)
                         raise Exception("ERROR: problem opening file for writing. " + str(e))
                     f.write(profile.keyFile)
-                    importScriptFile.write(f"tmsh install sys crypto key /{profile.partition}/{profile.keyFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.keyFileName} }}\n")
+                    #importScriptFile.write(f"tmsh install sys crypto key /{profile.partition}/{profile.keyFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.keyFileName} }}\n")
+                    importCommands += f"tmsh install sys crypto key /{profile.partition}/{profile.keyFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.keyFileName} }}\n"
                     f.close()
                 if profile.chainFileName != "":
                     try:
@@ -615,8 +664,21 @@ def writeSslFiles():
                         #log_error("ERROR: problem opening file for writing. " + e)
                         raise Exception("ERROR: problem opening file for writing. " + str(e))
                     f.write(profile.chainFile)
-                    importScriptFile.write(f"tmsh install sys crypto cert /{profile.partition}/{profile.chainFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.chainFileName} }}\n")
+                    #importScriptFile.write(f"tmsh install sys crypto cert /{profile.partition}/{profile.chainFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.chainFileName} }}\n")
+                    importCommands += f"tmsh install sys crypto cert /{profile.partition}/{profile.chainFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.chainFileName} }}\n"
                     f.close()
+
+    # Open file for writing import commands to:
+    try:
+        importScriptFile = open(f"{args.sslFileDir}/avi2bigip_ssl_file_import.sh", "w")
+    except Exception as e:
+        #log_error("ERROR: problem opening file for writing. " + e)
+        raise Exception("ERROR: problem opening file for writing. " + str(e))
+
+    for partition in partitionList:
+        importScriptFile.write(f"tmsh create auth partition /{partition}\n")
+
+    importScriptFile.write(f"{importCommands}\n")
     importScriptFile.close()
     return
 

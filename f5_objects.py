@@ -29,6 +29,54 @@ class bigip_obj:
     def __repr__(self):
         return f"bigip_obj(name='{self.name}', description='{self.description}')"
 
+class httpProfile:
+    description = "LTM HTTP Profile"
+
+    def __init__(self, name):
+        self.name = f5_sanitize(name)
+        self.type = "http"
+        self.partition = "Common"
+        self.maxHeaderCount = 64
+        self.maxHeaderSize = 32768
+        self.insertXFF = "enabled"
+        self.acceptXFF = "disabled"
+        self.xffAlternativeNames = ""
+        self.oneconnectTransformations = "enabled"
+
+    @property
+    def name(self):
+        return self._name
+    @name.setter
+    def name(self, value):
+        self._name = f5_sanitize(value)
+
+    def __str__(self):
+        return f"bigip_httpProfile(name={self.name}"
+    def __repr__(self):
+        return f"bigip_httpProfile(name={self.name}"
+    def tmos_obj(self):
+        optionsStr = ""
+        for option in self.options:
+            optionsStr += f"{option} "
+        certKeyChainName = re.sub('.crt', '', self.certFileName)
+        return f"""ltm profile http /{self.partition}/{self.name} {{
+    defaults-from http
+    proxy-type reverse
+    enforcement {{
+        max-header-count {str(self.maxHeaderCount)}
+        max-header-size {str(self.maxHeaderSize)}
+        pipeline allow
+        unknown-method allow
+    }}
+    oneconnect-status-reuse "200 206"
+    oneconnect-transformations {self.oneconnectTransformations}
+    request-chunking sustain
+    response-chunking sustain
+    server-agent-name BigIP
+    insert-xforwarded-for {self.insertXFF}
+    accept-xff {self.acceptXFF}
+    xff-alternative-names {self.xffAlternativeNames}
+}}"""
 class ClientSSLProfile:
     description = "LTM ClientSSL Profile"
 
