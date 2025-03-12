@@ -52,6 +52,7 @@
 
 
 import sys
+import os
 import json
 from types import SimpleNamespace
 import f5_objects
@@ -99,15 +100,115 @@ def log_warning(logmessage):
 def getRefName(url):
     ref_querystring = parse_qs(urlparse(url).query)
     name =  ref_querystring["name"][0]
+    #name = name.replace(" ", "_")
+    #name = name.replace("%20", "_")
+    #name = name.replace("%2A", "wildcard")
     return name
 def getRefTenant(url):
     ref_querystring = parse_qs(urlparse(url).query)
     name =  ref_querystring["tenant"][0]
+    #name = name.replace(" ", "_")
+    #name = name.replace("%20", "_")
+    #name = name.replace("%2A", "wildcard")
     return name
 def getRefCloud(url):
     ref_querystring = parse_qs(urlparse(url).query)
     name =  ref_querystring["cloud"][0]
+    #name = name.replace(" ", "_")
+    #name = name.replace("%20", "_")
+    #name = name.replace("%2A", "wildcard")
     return name
+
+def generateCertKeyFile(name, obj, type):
+    filename = f"{args.sslFileDir}{name}.{type}"
+    try:
+        f = open(filename , "w")
+    except Exception as e:
+        raise Exception("ERROR: problem opening file for writing. " + str(e))
+    if type == "certificate":
+        f.write(obj.certificate)
+    if type == "key":
+        f.write(obj.key)
+
+
+
+def avi2bigip_clientssl_profile(aviSSLProfile, aviSSLKeyAndCertificate):
+
+    tenantName =  f5_objects.f5_sanitize(getRefName(aviSSLProfile.tenant_ref))
+
+    f5_profile = f5_objects.ClientSSLProfile(aviSSLKeyAndCertificate.name) 
+    f5_profile.partition = tenantName
+
+    # Sort out allowed TLS/SSL Versions... yes, this is ugly.
+    tls1_0 = "disabled"
+    tls1_1 = "disabled"
+    tls1_2 = "disabled"
+    tls1_3 = "disabled"
+    ssl3   = "disabled"
+
+    for version in aviSSLProfile.accepted_versions:
+        if version.type == "SSL_VERSION_TLS1":
+            tls1_0 = "enabled"
+        if version.type == "SSL_VERSION_TLS1_1":
+            tls1_1 = "enabled"
+        if version.type == "SSL_VERSION_TLS1_2":
+            tls1_2 = "enabled"
+        if version.type == "SSL_VERSION_TLS1_3":
+            tls1_3 = "enabled"
+        if version.type == "SSL_VERSION_SSLV3":
+            ssl3 = "enabled"
+    ssl_options = [ "dont-insert-empty-fragments" ]
+    if ssl3 == "disabled":
+        ssl_options.append("no-sslv3")
+    if tls1_0 == "disabled":
+        ssl_options.append("no-tlsv1")
+    if tls1_1 == "disabled":
+        ssl_options.append("no-tlsv1_1")
+    if tls1_2 == "disabled":    
+        ssl_options.append("no-tlsv1_2")
+    if tls1_3 == "disabled":
+        ssl_options.append("no-tlsv1_3")
+
+    f5_profile.ciphers = aviSSLProfile.accepted_ciphers
+
+    cert = aviSSLKeyAndCertificate.certificate.certificate
+    #print(f"DEBUG: Cert: {cert}")
+    key = aviSSLKeyAndCertificate.key
+    #print(f"DEBUG: Key: {key}")
+
+    f5_profile.certFileName = f"{f5_profile.name}.crt"
+    f5_profile.certFile = cert
+    f5_profile.keyFileName = f"{f5_profile.name}.key"
+    f5_profile.keyFile = key
+
+    if hasattr(aviSSLKeyAndCertificate, 'ca_certs'):
+        chain = ""
+        for ca in aviSSLKeyAndCertificate.ca_certs:
+            if not hasattr(ca, 'ca_ref'):
+                log_warning("ClientSSL Profile: " + aviSSLProfile.name + " Don't know how to handle ca_certs without ca_ref.")
+                continue
+            caName = f5_objects.f5_sanitize(getRefName(ca.ca_ref))
+            caTenant = f5_objects.f5_sanitize(getRefTenant(ca.ca_ref))
+            for cert in avi_config.SSLKeyAndCertificate:
+                certName = f5_objects.f5_sanitize(cert.name)
+                certTenant = f5_objects.f5_sanitize(getRefName(cert.tenant_ref))
+                print(f"DEBUG: TESTING {caName} == {certName} and certTenant {caTenant} == {certTenant}")
+                if certName == caName and certTenant == caTenant:
+                    chain = chain + "\n" + cert.certificate.certificate
+        f5_profile.chainFileName = f"{f5_objects.f5_sanitize(aviSSLKeyAndCertificate.ca_certs[0].name)}.crt"
+        f5_profile.chainFile = chain
+        print(f"DEBUG: ChainFileName: {f5_profile.chainFileName} Chain: {f5_profile.chainFile}") 
+
+
+
+    #if aviNetworkProfile.profile.type == "PROTOCOL_TYPE_UDP_FAST_PATH" and type == "fastl4":
+    #    f5_profile.datagramLoadBalancing = "enabled"
+    #    # snat's don't exist in F5 profiles.... but oneoff handling.
+    #    if snat == "disabled":
+    #        f5_profile.snat = "disabled"
+    #if tenantName == "admin":
+    #    f5_profile.partition = "Common"
+    return f5_profile
 
 def avi2bigip_network_profile(aviNetworkProfile):
     tenantName =  f5_objects.f5_sanitize(getRefName(aviNetworkProfile.tenant_ref))
@@ -135,7 +236,7 @@ def avi2bigip_network_profile(aviNetworkProfile):
             timeout = int(aviNetworkProfile.profile.sctp_proxy_profile.idle_timeout)
         case _:
             log_warning("Network Profile: " + aviNetworkProfile.name + " Don't know how to handle type: " + aviNetworkProfile.profile.type)
-    
+
     f5_profile = f5_objects.networkProfile(aviNetworkProfile.name, type) 
     f5_profile.timeout = timeout
     f5_profile.partition = tenantName
@@ -166,11 +267,11 @@ def avi2bigip_monitor(monitor):
         case "HEALTH_MONITOR_PING":
             type = "gateway_icmp"
         case "HEALTH_MONITOR_EXTERNAL":
-            log_error("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
-            raise
+            #log_error("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
+            raise Exception("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
         case _:
-            log_error("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
-            raise
+            #log_error("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
+            raise Exception("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
 
     f5_monitor = f5_objects.monitor(monitor.name, type)
 
@@ -304,15 +405,15 @@ def avi2bigip_pool(pool):
 
 def avi2bigip_virtual(virtual):
     if virtual.type != "VS_TYPE_NORMAL":
-        log_error("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
-        raise
+        #log_error("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
+        raise Exception("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
     tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
     #if pool.append_port != "NEVER":
     #    log_warning("Virtual: " + pool.name + " Don't know how to handle append_port: " + pool.append_port)
 
     if not hasattr(virtual, 'services'):
-        log_warning("Virtual: " + virtual.name + " Don't know how to handle no services on VirtualService object." )
-        raise
+        #log_warning("Virtual: " + virtual.name + " Don't know how to handle no services on VirtualService object." )
+        raise Exception("Virtual: " + virtual.name + " Don't know how to handle no services on VirtualService object." )
     if len(virtual.services) > 1:
         log_error("Virtual: " + virtual.name + " Don't know how to handle multiple services on VirtualService object." )
     if virtual.services[0].port != virtual.services[0].port_range_end:
@@ -365,26 +466,66 @@ def avi2bigip_virtual(virtual):
     networkProfileFound = 0
     for networkProfile in avi_config.NetworkProfile:
         if networkProfile.name == networkProfileName and f5_objects.f5_sanitize(getRefName(networkProfile.tenant_ref)) == networkProfileTenant:
-            f5_network_profile = avi2bigip_network_profile(networkProfile)
+            try:
+                f5_network_profile = avi2bigip_network_profile(networkProfile)
+            except Exception as e:
+                log_error("Network Profile: " + networkProfile.name + " not able to be converted to bigip object " + str(e))
             networkProfileFound += 1
     
     if networkProfileFound == 0:
-        print(f"ERROR: networkProfile: {networkProfileName} not found in networkProfileTenant {networkProfileTenant}.")
-        raise
+        #print(f"ERROR: networkProfile: {networkProfileName} not found in networkProfileTenant {networkProfileTenant}.")
+        raise Exception(f"ERROR: networkProfile: {networkProfileName} not found in networkProfileTenant {networkProfileTenant}.")
     if networkProfileFound > 1:
-        print(f"ERROR: Multiple network profiles found networkProfile: {networkProfileName} networkProfileTenant {networkProfileTenant}.")
-        raise
-
+        #print(f"ERROR: Multiple network profiles found networkProfile: {networkProfileName} networkProfileTenant {networkProfileTenant}.")
+        raise Exception(f"ERROR: Multiple network profiles found networkProfile: {networkProfileName} networkProfileTenant {networkProfileTenant}.")
 
     f5_virtual = f5_objects.virtual(virtual.name, destination, default_pool)
     f5_virtual.routeDomain = vrfName
-
-    f5_virtual.profilesAll = [f"/{f5_network_profile.partition}/{f5_network_profile.name}"]
+    profiles = []
+    
+    profiles.append(f5_network_profile)
+    f5_virtual.profilesAll.append(f"/{f5_network_profile.partition}/{f5_network_profile.name}")
 
     if tenantName != "admin":
         f5_virtual.partition = tenantName
 
-    return f5_virtual, f5_network_profile
+
+    # Now SSL Profile, if it has one.
+    if hasattr(virtual, 'ssl_profile_ref'):
+        sslProfileName = getRefName(virtual.ssl_profile_ref)
+        sslProfileTenant = f5_objects.f5_sanitize(getRefTenant(virtual.ssl_profile_ref))
+
+        if len(virtual.ssl_key_and_certificate_refs) > 1:
+            log_warning("Virtual: " + virtual.name + " Don't know how to handle multiple ssl_key_and_certificate_refs." )
+        sslCertProfileName = getRefName(virtual.ssl_key_and_certificate_refs[0])
+        sslCertProfileTenant = f5_objects.f5_sanitize(getRefTenant(virtual.ssl_key_and_certificate_refs[0]))
+    
+        sslProfileFound = 0
+        for sslProfile in avi_config.SSLProfile:
+            if sslProfile.name == sslProfileName and f5_objects.f5_sanitize(getRefName(sslProfile.tenant_ref)) == sslProfileTenant:
+                #print(f"DEBUG: found matching sslProfile: {sslProfileName} sslProfileTenant {sslProfileTenant}")
+                for sslCertProfile in avi_config.SSLKeyAndCertificate:
+                    if sslCertProfile.name == sslCertProfileName and f5_objects.f5_sanitize(getRefName(sslCertProfile.tenant_ref)) == sslCertProfileTenant:
+                        #print(f"DEBUG: found matching sslProfileCertAndKey: {sslCertProfile.name} sslProfileTenant {sslCertProfile.tenant_ref}")
+                        try:
+                            f5_clientssl_profile = avi2bigip_clientssl_profile(sslProfile, sslCertProfile)
+                        except Exception as e:
+                            log_error("ERROR: clientssl profile: " + sslProfileName + " " + sslCertProfileName + " not able to be converted to bigip object " + str(e))
+                            print(e)
+                        sslProfileFound += 1
+
+        if sslProfileFound == 0:
+            #log_error(f"ERROR: sslProfile: {sslProfileName} not found in sslProfileTenant {sslProfileTenant}.")
+            raise Exception(f"ERROR: sslProfile: {sslProfileName} not found in sslProfileTenant {sslProfileTenant}.")
+        if sslProfileFound > 1:
+            #log_error(f"ERROR: Multiple ssl profiles found sslProfile: {sslProfileName} sslProfileTenant {sslProfileTenant}.")
+            raise Exception(f"ERROR: Multiple ssl profiles found sslProfile: {sslProfileName} sslProfileTenant {sslProfileTenant}.")
+    
+        f5_virtual.profilesClientSide.append(f"/{f5_clientssl_profile.partition}/{f5_clientssl_profile.name}")
+        profiles.append(f5_clientssl_profile)
+
+
+    return f5_virtual, profiles
 
 
 def loadAviConfigFile(filename) -> SimpleNamespace:
@@ -397,9 +538,9 @@ def loadAviConfigFile(filename) -> SimpleNamespace:
 def writeBigIpConfig():
     try:
         f = open(args.bigipConfigFile, "w")
-    except:
-        log_error("ERROR: problem opening file for writing.")
-        raise
+    except Exception as e:
+        #log_error("ERROR: problem opening file for writing. " + e)
+        raise Exception("ERROR: problem opening file for writing. " + str(e))
 
     for tenant in avi_tenants:
         if tenant.name == "admin":
@@ -427,13 +568,65 @@ def writeBigIpConfig():
 
     return
 
+def writeSslFiles():
+    if args.sslFileDir == "":
+        args.sslFileDir = os.getcwd() + "/sslFiles/"
+    try:
+        os.makedirs(args.sslFileDir, exist_ok=True)
+    except Exception as e:
+        #log_error(f"ERROR: problem creating SSL File Directory: {args.sslFileDir} " + e)
+        raise Exception(f"ERROR: problem creating SSL File Directory: {args.sslFileDir} " + str(e))
+
+    # Open file for writing import commands to:
+    try:
+        importScriptFile = open(f"{args.sslFileDir}/avi2bigip_ssl_file_import.sh", "w")
+    except Exception as e:
+        #log_error("ERROR: problem opening file for writing. " + e)
+        raise Exception("ERROR: problem opening file for writing. " + str(e))
+    
+    # Write out SSL Files:
+    for tenant in avi_tenants:
+        if tenant.name == "admin":
+            tenant.name = "Common"
+        for profile in tenant.f5_profiles:
+            if profile.type == "client-ssl":
+                if profile.certFileName != "":
+                    try:
+                        f = open(f"{args.sslFileDir}/{profile.partition}___{profile.certFileName}", "w")
+                    except Exception as e:
+                        #log_error("ERROR: problem opening file for writing. " + e)
+                        raise Exception("ERROR: problem opening file for writing. " + str(e))
+                    f.write(profile.certFile)
+                    importScriptFile.write(f"tmsh install sys crypto cert /{profile.partition}/{profile.certFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.certFileName} }}\n")
+                    f.close()
+                if profile.keyFileName != "":
+                    try:
+                        f = open(f"{args.sslFileDir}/{profile.partition}___{profile.keyFileName}", "w")
+                    except Exception as e:
+                        #log_error("ERROR: problem opening file for writing. " + e)
+                        raise Exception("ERROR: problem opening file for writing. " + str(e))
+                    f.write(profile.keyFile)
+                    importScriptFile.write(f"tmsh install sys crypto key /{profile.partition}/{profile.keyFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.keyFileName} }}\n")
+                    f.close()
+                if profile.chainFileName != "":
+                    try:
+                        f = open(f"{args.sslFileDir}/{profile.partition}___{profile.chainFileName}", "w")
+                    except Exception as e:
+                        #log_error("ERROR: problem opening file for writing. " + e)
+                        raise Exception("ERROR: problem opening file for writing. " + str(e))
+                    f.write(profile.chainFile)
+                    importScriptFile.write(f"tmsh install sys crypto cert /{profile.partition}/{profile.chainFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.chainFileName} }}\n")
+                    f.close()
+    importScriptFile.close()
+    return
+
 def main() -> int:
 
     global avi_config
     try:
         avi_config = loadAviConfigFile(args.aviJsonFile)
-    except:
-        log_error("ERROR: problem loading Avi JSON Configuration.")
+    except Exception as e:
+        log_error("ERROR: problem loading Avi JSON Configuration. " + str(e))
         return 1
 
     global avi_tenants
@@ -480,8 +673,8 @@ def main() -> int:
     
         try:
             f5_monitor = avi2bigip_monitor(monitor)
-        except:
-            log_error("Monitor: " + monitor.name + " not able to be converted to bigip object")
+        except Exception as e:
+            log_error("Monitor: " + monitor.name + " not able to be converted to bigip object " + str(e))
             continue
     
         addedToTenant = 0
@@ -507,8 +700,8 @@ def main() -> int:
             continue
         try:
             f5_pool = avi2bigip_pool(pool)
-        except:
-            log_error("Pool: " + pool.name + " not able to be converted to bigip object")
+        except Exception as e:
+            log_error("Pool: " + pool.name + " not able to be converted to bigip object " + str(e))
             continue
         addedToTenant = 0
         for tenant in avi_tenants:
@@ -530,24 +723,25 @@ def main() -> int:
         if cloudName != args.aviCloud:
             continue
         try:
-            f5_virtual, f5_network_profile = avi2bigip_virtual(virtual)
-        except:
-            log_error("virtual: " + virtual.name + " not able to be converted to bigip object")
+            f5_virtual, profiles = avi2bigip_virtual(virtual)
+        except Exception as e:
+            log_error("virtual: " + virtual.name + " not able to be converted to bigip object " + str(e))
             continue
         addedToTenant = 0
         for tenant in avi_tenants:
             if tenant.name == tenantName:
                 tenant.f5_virtuals.append(f5_virtual)
                 addedToTenant = 1
-            print(f"DEBUG: TESTING Network Profile: {f5_network_profile.name} with Partition: {f5_network_profile.partition} against tenant: {tenant.name}")
-            if tenant.name == f5_network_profile.partition:
-                print(f"DEBUG: Adding Network Profile: {f5_network_profile.name} to tenant: {tenant.name}")
-                profileExists = 0
-                for profile in tenant.f5_profiles:
-                    if profile.name == f5_network_profile.name:
-                        profileExists = 1
-                if profileExists == 0:
-                    tenant.f5_profiles.append(f5_network_profile)
+            for profile in profiles:
+                #print(f"DEBUG: TESTING Profile: {profile.name} with Partition: {profile.partition} against tenant: {tenant.name}")
+                if tenant.name == profile.partition:
+                    #print(f"DEBUG: Adding Profile: {profile.name} to tenant: {tenant.name}")
+                    profileExists = 0
+                    for profile in tenant.f5_profiles:
+                        if profile.name == profile.name:
+                            profileExists = 1
+                    if profileExists == 0:
+                        tenant.f5_profiles.append(profile)
         if addedToTenant == 0:
             log_error("Virtual: " + virtual.name + " not added to any tenant, no tenant found for: " + tenant.name)
             addedToTenant = 0
@@ -560,8 +754,14 @@ def main() -> int:
 
     try: 
         writeBigIpConfig()
-    except:
-        log_error("ERROR: problem writing BigIP Config.")
+    except Exception as e:
+        log_error("ERROR: problem writing BigIP Config." + str(e))
+        return 1
+
+    try: 
+        writeSslFiles()
+    except Exception as e:
+        log_error("ERROR: problem writing SSL Files." + str(e))
         return 1
 
     return 0
@@ -577,6 +777,7 @@ if __name__ == '__main__':
     parser.add_argument("-c", "--avi-cloud", action="store", dest="aviCloud", default="VM-Default-Cloud")
     parser.add_argument("-t", "--avi-tenant", action="store", dest="aviTenant", default="all")
     parser.add_argument("-b", "--bigip-conf", action="store", dest="bigipConfigFile", default="avi_bigip_for_merge.conf")
+    parser.add_argument("-d", "--ssl-file-dir", action="store", dest="sslFileDir", default="")
     global args
     args = parser.parse_args()
 

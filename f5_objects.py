@@ -3,6 +3,7 @@ from enum import Enum;
 
 def f5_sanitize(name):
     clean_name = name.replace("%20", "_")
+    clean_name = clean_name.replace("%2A", "wildcard")
     clean_name = clean_name.replace(" ", "_")
     clean_name = clean_name.replace("-", "_")
     if re.match(r'^[a-zA-Z/]', clean_name):
@@ -25,6 +26,53 @@ class bigip_obj:
 
     def __repr__(self):
         return f"bigip_obj(name='{self.name}', description='{self.description}')"
+
+class ClientSSLProfile:
+    description = "LTM ClientSSL Profile"
+
+    def __init__(self, name):
+        self.name = f5_sanitize(name)
+        self.type = "client-ssl"
+        self.partition = "Common"
+        self.options = [ "dont-insert-empty-fragments", "no-ssl", "no-dtls", "no-tlsv1.3", "no-tlsv1"]
+        self.ciphers = "DEFAULT"
+        self.certFileName = ""
+        self.certFile = ""
+        self.keyFileName = ""
+        self.keyFile = ""
+        self.chainFileName = ""
+        self.chainFile = ""
+        self.caFileName = ""
+        self.caFile = ""
+
+    @property
+    def name(self):
+        return self._name
+    @name.setter
+    def name(self, value):
+        self._name = f5_sanitize(value)
+
+    def __str__(self):
+        return f"bigip_clientssl(name={self.name}"
+    def __repr__(self):
+        return f"bigip_clientssl(name={self.name}"
+    def tmos_obj(self):
+        optionsStr = ""
+        for option in self.options:
+            optionsStr += f"{option} "
+        certKeyChainName = re.sub('.crt', '', self.certFileName)
+        return f"""ltm profile client-ssl /{self.partition}/{self.name} {{
+    defaults-from clientssl
+    cert-key-chain {{
+        {certKeyChainName} {{
+            cert {self.certFileName}
+            key {self.keyFileName}
+            chain {self.chainFileName}
+        }}
+    }}
+    ciphers {self.ciphers}
+    options {{ {optionsStr} }}
+}}"""
 
 class networkProfile:
     description = "LTM Network Profile"
