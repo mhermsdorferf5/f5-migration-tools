@@ -192,12 +192,12 @@ def avi2bigip_clientssl_profile(aviSSLProfile, aviSSLKeyAndCertificate):
             for cert in avi_config.SSLKeyAndCertificate:
                 certName = f5_objects.f5_sanitize(cert.name)
                 certTenant = f5_objects.f5_sanitize(getRefName(cert.tenant_ref))
-                print(f"DEBUG: TESTING {caName} == {certName} and certTenant {caTenant} == {certTenant}")
+                #print(f"DEBUG: TESTING {caName} == {certName} and certTenant {caTenant} == {certTenant}")
                 if certName == caName and certTenant == caTenant:
                     chain = chain + "\n" + cert.certificate.certificate
         f5_profile.chainFileName = f"{f5_objects.f5_sanitize(aviSSLKeyAndCertificate.ca_certs[0].name)}.crt"
         f5_profile.chainFile = chain
-        print(f"DEBUG: ChainFileName: {f5_profile.chainFileName} Chain: {f5_profile.chainFile}") 
+        #print(f"DEBUG: ChainFileName: {f5_profile.chainFileName} Chain: {f5_profile.chainFile}") 
 
 
 
