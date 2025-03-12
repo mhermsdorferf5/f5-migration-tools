@@ -5,11 +5,13 @@ def f5_sanitize(name):
     clean_name = name.replace("%20", "_")
     clean_name = clean_name.replace("%2A", "wildcard")
     clean_name = clean_name.replace(" ", "_")
-    clean_name = clean_name.replace("-", "_")
+    #clean_name = clean_name.replace("-", "_")
     if re.match(r'^[a-zA-Z/]', clean_name):
-        return clean_name.lower()
+        #return clean_name.lower()
+        return clean_name
     else:
-        return "a_" + clean_name.lower()
+        #return "a_" + clean_name.lower()
+        return "object_" + clean_name
 
 class bigip_obj:
     description = "Generic BIG-IP Object"
