@@ -331,6 +331,7 @@ class pool_member:
         self.port = port
         self.enabled = True
         self.ratio = 1
+        self.priority = 0
 
     def __str__(self):
         return f"bigip_pool_member(name='{self.name}', dest='{self.dest}', port='{self.port}')"
@@ -341,10 +342,14 @@ class pool_member:
         if re.match(r'\d+\.\d+\.\d+\.\d+', self.dest):
             return f"""        /Common/{self.name}:{self.port} {{
             address {self.dest}
+            ratio {self.ratio}
+            priority {self.priority}
         }}"""
         else:
             return f"""        /Common/{self.name}:{self.port} {{
             fqdn {{ name {self.dest} }}
+            ratio {self.ratio}
+            priority {self.priority}
         }}"""
 
 
@@ -362,6 +367,7 @@ class pool(bigip_obj):
         self.routeDomain = "0"
         self.partition = "Common"
         self.monitors = "none"
+        self.minActiveMembers = 0
 
     @property
     def name(self):
@@ -405,6 +411,7 @@ class pool(bigip_obj):
     load-balancing-mode {self.loadBalancingMode}
     service-down-action {self.serviceDownAction}
     monitor {self.monitors}
+    min-active-members {self.minActiveMembers}
 }}"""
         return f"""ltm pool /{self.partition}/{self.name} {{
     allow-snat {self.allowSNAT}
@@ -413,6 +420,7 @@ class pool(bigip_obj):
     service-down-action {self.serviceDownAction}
     members {{ {members_objs}    }}
     monitor {self.monitors}
+    min-active-members {self.minActiveMembers}
 }}"""
 
 

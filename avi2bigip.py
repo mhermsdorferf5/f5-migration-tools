@@ -428,6 +428,54 @@ def avi2bigip_monitor(monitor):
         del monitor_attrs, send_str, type, recv_code, recv_str, num_subs
     return f5_monitor
 
+def avi2bigip_poolGroup(poolGroup):
+    poolGroupName = f"{f5_objects.f5_sanitize(poolGroup.name)}_poolGroup"
+    tenantName =  f5_objects.f5_sanitize(getRefName(poolGroup.tenant_ref))
+
+    f5_members = []
+    vrfName = ""
+    serverSideSSLProfileRef = ""
+    for subPool in poolGroup.members:
+        priority = subPool.priority_label
+        subPoolName =  getRefName(subPool.pool_ref)
+        subPoolTenant =  f5_objects.f5_sanitize(getRefTenant(subPool.pool_ref))
+        for pool in avi_config.Pool:
+            poolName =  f5_objects.f5_sanitize(pool.name)
+            tenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
+            if subPoolName == poolName and subPoolTenant == tenantName:
+                if hasattr(pool, 'ssl_profile_ref'): 
+                    if serverSideSSLProfileRef == "":
+                        serverSideSSLProfileRef = pool.ssl_profile_ref
+                        log_debug(f"Pool Group: {poolGroupName} Found SSL Profile: {serverSideSSLProfileRef} inside {pool.name}.")
+                    elif serverSideSSLProfileRef != pool.ssl_profile_ref:
+                        log_warning(f"Pool Group: {poolGroupName} Don't know how to handle multiple SSL Profiles in Pool Group, using: {serverSideSSLProfileRef} Found: {pool.ssl_profile_ref} inside {pool.name}.")
+                if poolName == subPoolName and tenantName == subPoolTenant:
+                    vrfName    =  getRefName(pool.vrf_ref)
+                    if hasattr(pool, 'servers'): 
+                        for member in pool.servers:
+                            if member.resolve_server_by_dns == True:
+                                member.ip.addr = member.hostname
+                            if hasattr(member, 'port'):
+                                f5_member = f5_objects.pool_member(member.ip.addr, member.port)
+                            else:
+                                f5_member = f5_objects.pool_member(member.ip.addr, pool.default_server_port)
+                            if member.ratio != 1:
+                                f5_member.ratio = member.ratio
+                            if member.enabled != "true":
+                                f5_member.enabled = "no"
+                            member.priority = priority
+                            f5_members.append(f5_member)
+
+    if tenantName == "admin":
+        tenantName = "Common"
+
+    f5_pool = f5_objects.pool(poolGroupName, f5_members )
+    f5_pool.routeDomain = vrfName
+    f5_pool.minActiveMembers = poolGroup.min_servers
+
+    return f5_pool, serverSideSSLProfileRef
+
+
 def avi2bigip_pool(pool):
     tenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
     vrfName    =  getRefName(pool.vrf_ref)
@@ -435,7 +483,7 @@ def avi2bigip_pool(pool):
     if pool.pool_type != "POOL_TYPE_GENERIC_APP":
         log_error("Pool: " + pool.name + " Don't know how to handle pool_type: " + pool.pool_type )
     if pool.append_port != "NEVER":
-        log_error("Pool: " + pool.name + " Don't know how to handle append_port: " + pool.append_port)
+        log_warning("Pool: " + pool.name + " Don't know how to handle append_port: " + pool.append_port)
 
     f5_members = []
     if hasattr(pool, 'servers'): 
@@ -462,7 +510,7 @@ def avi2bigip_pool(pool):
         if pool.use_service_port:
             log_warning("Pool: " + pool.name + " Don't know how to handle use_service_port: True")
     if hasattr(pool, 'ssl_key_and_certificate_ref'): 
-        log_error("Pool: " + pool.name + " Don't know how to handle ssl_key_and_certificate_ref for mTLS on server-side")
+        log_error("Pool: " + pool.name + "Don't know how to handle ssl_key_and_certificate_ref for mTLS on server-side")
     if hasattr(pool, 'fail_action'): 
         match pool.fail_action.type:
             case "FAIL_ACTION_CLOSE_CONN":
@@ -539,8 +587,6 @@ def avi2bigip_virtual(virtual):
     if virtual.use_vip_as_snat == "true":
         log_warning("Virtual: " + virtual.name + " Don't know how to handle use_vip_as_snat." )
 
-    if len(virtual.services) > 1:
-        log_error("Virtual: " + virtual.name + " Don't know how to handle multiple services on VirtualService object." )
     destPortList = []
     destIpList = []
     destinationList = []
@@ -558,7 +604,6 @@ def avi2bigip_virtual(virtual):
             for vrf in migration_config.routeDomainMapping:
                 if vrfName == vrf.vrfName:
                     routeDomainID = vrf.rdID
-            print(vrfName)
             # if RD is zero let it pickup default route domain from the partition.
             if routeDomainID == 0:
                 destIpList.append(f"{ip}")
@@ -571,32 +616,61 @@ def avi2bigip_virtual(virtual):
     if mask != 32:
         log_warning(f"VsVip: {vsVipName} Don't know how to handle VIP with non /32 bit mask." )
 
+    # Use this to handle ServerSSL Config, based on Avi Pool
+    serverSideSSLProfileRef = ""
     # Figure out pool:
     default_pool = "none"
     if hasattr(virtual, 'pool_ref'):
-        # lookup pool Reference and pool name
         default_pool_name =  f5_objects.f5_sanitize(getRefName(virtual.pool_ref))
         default_pool_tenant =  f5_objects.f5_sanitize(getRefTenant(virtual.pool_ref))
+        for pool in avi_config.Pool:
+            poolName =  f5_objects.f5_sanitize(pool.name)
+            poolTenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
+            if poolName == default_pool_name and poolTenantName == default_pool_tenant:
+                if poolTenantName == "admin":
+                    poolTenantName = "Common"
+                if hasattr(pool, 'ssl_profile_ref'): 
+                    serverSideSSLProfileRef = pool.ssl_profile_ref
+                try:
+                    f5_pool = avi2bigip_pool(pool)
+                except Exception as e:
+                    log_error("Pool: " + pool.name + " not able to be converted to bigip object " + str(e))
+                    continue
+                addedPoolToTenant = 0
+                for tenant in avi_tenants:
+                    if tenant.name == poolTenantName:
+                        tenant.f5_pools.append(f5_pool)
+                        addedPoolToTenant = 1
+                if addedPoolToTenant == 0:
+                    log_error("Pool: " + pool.name + " not added to any tenant, no tenant found for: " + tenant.name)
+                break
+        # Add Pool to Virtual Config:
         default_pool =  f"/{default_pool_tenant}/{default_pool_name}"
     if hasattr(virtual, 'pool_group_ref'):
-        log_error("Virtual: " + virtual.name + " Don't know how to handle pool_group_ref." )
+        default_pool_name =  f5_objects.f5_sanitize(getRefName(virtual.pool_group_ref))
+        default_pool_tenant =  f5_objects.f5_sanitize(getRefTenant(virtual.pool_group_ref))
+        for pool in avi_config.PoolGroup:
+            poolName =  f5_objects.f5_sanitize(pool.name)
+            poolTenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
+            if poolName != default_pool_name and poolTenantName != default_pool_tenant:
+                if poolTenantName == "admin":
+                    poolTenantName = "Common"
+                try:
+                    f5_pool, serverSideSSLProfileRef = avi2bigip_poolGroup(pool)
+                except Exception as e:
+                    log_error("Pool Group: " + pool.name + " not able to be converted to bigip object " + str(e))
+                    continue
+                addedPoolToTenant = 0
+                for tenant in avi_tenants:
+                    if tenant.name == poolTenantName:
+                        tenant.f5_pools.append(f5_pool)
+                        addedPoolToTenant = 1
+                if addedPoolToTenant == 0:
+                    log_error("Pool: " + pool.name + " not added to any tenant, no tenant found for: " + tenant.name)
+                break
+        # Add Pool to Virtual Config:
+        default_pool =  f"/{default_pool_tenant}/{default_pool_name}"
 
-    # Get ServerSide SSL Info:
-    serverSideSSLProfileRef = ""
-    for pool in avi_config.Pool:
-        poolTenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
-        poolName =  f5_objects.f5_sanitize(pool.name)
-        if poolTenantName == default_pool_tenant and poolName == default_pool_name:
-            log_debug(f"Found matching pool: {poolName} in tenant: {poolTenantName} looking for serverSideSSLProfileRef")
-            if hasattr(pool, 'ssl_profile_ref'): 
-                serverSideSSLProfileRef = pool.ssl_profile_ref
-
-    #poolMatchCount = 0
-    #for pool in f5_pools:
-    #   if default_pool == pool.name:
-    #       poolMatchCount = poolMatchCount+1
-    #if poolMatchCount != 1 and default_pool != "none":
-    #    log_warning("Virtual: " + virtual.name + " uses pool: " + default_pool + " but there's more than one object with the same name count: " + str(poolMatchCount) + "." )
 
     f5_virtual = f5_objects.virtual(virtual.name, destination, default_pool)
     f5_virtual.routeDomain = vrfName
@@ -927,19 +1001,21 @@ def main() -> int:
 
     if args.debug:
         print("DEBUGGING ENAABLED")
-        logging.basicConfig(
-         filename=args.logFile, 
-            level=logging.DEBUG,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+        if args.logToFile:
+            logging.basicConfig(
+                filename=args.logFile, 
+                level=logging.DEBUG,
+                format='%(asctime)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
     else:
-        logging.basicConfig(
-         filename=args.logFile, 
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+        if args.logToFile:
+            logging.basicConfig(
+                filename=args.logFile, 
+                level=logging.INFO,
+                format='%(asctime)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
 
     aviVipCount = 0
     f5VipCount = 0
@@ -1008,34 +1084,6 @@ def main() -> int:
         
         #cleanup vars:
         del addedToTenant, f5_monitor, tenantName
-    
-    
-    for pool in avi_config.Pool:
-        tenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
-        if tenantName == "admin":
-            tenantName = "Common"
-        vrfName    =  getRefName(pool.vrf_ref)
-        cloudName = getRefName(pool.cloud_ref)
-        if cloudName != args.aviCloud:
-            continue
-        if args.aviTenant != "all" and tenantName != args.aviTenant:
-            continue
-        try:
-            f5_pool = avi2bigip_pool(pool)
-        except Exception as e:
-            log_error("Pool: " + pool.name + " not able to be converted to bigip object " + str(e))
-            continue
-        addedToTenant = 0
-        for tenant in avi_tenants:
-            if tenant.name == tenantName:
-                tenant.f5_pools.append(f5_pool)
-                addedToTenant = 1
-        if addedToTenant == 0:
-            log_error("Pool: " + pool.name + " not added to any tenant, no tenant found for: " + tenant.name)
-            addedToTenant = 0
-    
-        #cleanup vars:
-        del tenantName, addedToTenant, f5_pool, vrfName, cloudName
     
     for virtual in avi_config.VirtualService:
         tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
