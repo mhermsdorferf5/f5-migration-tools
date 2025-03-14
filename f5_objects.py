@@ -42,6 +42,7 @@ class httpProfile:
         self.acceptXFF = "disabled"
         self.xffAlternativeNames = ""
         self.oneconnectTransformations = "enabled"
+        self.redirectRewrite = "none"
 
     @property
     def name(self):
@@ -72,6 +73,56 @@ class httpProfile:
     insert-xforwarded-for {self.insertXFF}
     accept-xff {self.acceptXFF}
     xff-alternative-names {self.xffAlternativeNames}
+    redirect-rewrite {self.redirectRewrite}
+}}"""
+class ServerSSLProfile:
+    description = "LTM ServerSSL Profile"
+
+    def __init__(self, name):
+        self.name = f5_sanitize(name)
+        self.type = "server-ssl"
+        self.partition = "Common"
+        self.options = [ "dont-insert-empty-fragments", "no-ssl", "no-dtls", "no-tlsv1.3", "no-tlsv1"]
+        self.ciphers = "DEFAULT"
+        self.certFileName = ""
+        self.certFile = ""
+        self.keyFileName = ""
+        self.keyFile = ""
+        self.chainFileName = ""
+        self.chainFile = ""
+        self.caFileName = ""
+        self.caFile = ""
+
+    @property
+    def name(self):
+        return self._name
+    @name.setter
+    def name(self, value):
+        self._name = f5_sanitize(value)
+
+    def __str__(self):
+        return f"bigip_serverssl(name={self.name}"
+    def __repr__(self):
+        return f"bigip_serverssl(name={self.name}"
+    def tmos_obj(self):
+        optionsStr = ""
+        certKeyChainStr = ""
+        certKeyChainName = re.sub('.crt', '', self.certFileName)
+        if certKeyChainName != "":
+            certKeyChainStr = f"""    cert-key-chain {{
+        {certKeyChainName} {{
+            cert {self.certFileName}
+            key {self.keyFileName}
+            chain {self.chainFileName}
+        }}"""
+        for option in self.options:
+            optionsStr += f"{option} "
+        certKeyChainName = re.sub('.crt', '', self.certFileName)
+        return f"""ltm profile server-ssl /{self.partition}/{self.name} {{
+    defaults-from serverssl
+    {certKeyChainStr}
+    ciphers {self.ciphers}
+    options {{ {optionsStr} }}
 }}"""
 class ClientSSLProfile:
     description = "LTM ClientSSL Profile"
@@ -160,9 +211,9 @@ class networkProfile:
             self._timeout = 300
 
     def __str__(self):
-        return f"bigip_monitor(name={self.name}, type={self.type}"
+        return f"bigip_networkProfile(name={self.name}, type={self.type}"
     def __repr__(self):
-        return f"bigip_monitor(name={self.name}, type={self.type}"
+        return f"bigip_networkProfile(name={self.name}, type={self.type}"
     def tmos_obj(self):
         match self.type:
             case "tcp":
@@ -382,6 +433,7 @@ class virtual(bigip_obj):
         self.snat = True
         self.snatType = "automap"
         self.snatPoolName = ""
+        self.irules = "none"
 
 
     @property
@@ -418,9 +470,9 @@ class virtual(bigip_obj):
     source-address-translation {{
         type automap
     }}"""
-                
         return f"""ltm virtual /{self.partition}/{self.name} {{
     destination {self.destination}
     pool {self.default_pool}
     profiles {{ {profiles}    }} {snatConfig}
+    rules {self.irules}
 }}"""

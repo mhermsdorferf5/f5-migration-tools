@@ -54,12 +54,14 @@
 import sys
 import os
 import json
+import copy
 from types import SimpleNamespace
 import f5_objects
 from urllib.parse import urlparse, parse_qs
-import pprintpp
 import re
 import argparse
+import logging
+import datetime
 
 
 class avi_tenant:
@@ -91,24 +93,37 @@ def usage ():
 def log_error(logmessage):
     logmessage = str("ERROR: " + logmessage)
     print(logmessage, file=sys.stderr)
+    if args.logToFile:
+        logging.error(logmessage)
 
 def log_warning(logmessage):
     logmessage = str("WARNING: " + logmessage)
     print(logmessage, file=sys.stderr)
+    if args.logToFile:
+        logging.warning(logmessage)
+
+def log_debug(logmessage):
+    if args.debug:
+        logmessage = str("DEBUG: " + logmessage)
+        print(logmessage, file=sys.stderr)
+        if args.logToFile:
+            logging.debug(logmessage)
 
 def getRefName(url):
     ref_querystring = parse_qs(urlparse(url).query)
     name =  ref_querystring["name"][0]
     #name = name.replace(" ", "_")
     #name = name.replace("%20", "_")
-    #name = name.replace("%2A", "wildcard")
+    name = name.replace("*", "%2A")
     return name
+
 def getRefTenant(url):
     ref_querystring = parse_qs(urlparse(url).query)
     name =  ref_querystring["tenant"][0]
     #name = name.replace(" ", "_")
     #name = name.replace("%20", "_")
     #name = name.replace("%2A", "wildcard")
+    name = name.replace("*", "%2A")
     return name
 def getRefCloud(url):
     ref_querystring = parse_qs(urlparse(url).query)
@@ -116,6 +131,7 @@ def getRefCloud(url):
     #name = name.replace(" ", "_")
     #name = name.replace("%20", "_")
     #name = name.replace("%2A", "wildcard")
+    name = name.replace("*", "%2A")
     return name
 
 def generateCertKeyFile(name, obj, type):
@@ -128,6 +144,19 @@ def generateCertKeyFile(name, obj, type):
         f.write(obj.certificate)
     if type == "key":
         f.write(obj.key)
+
+def createRedirectVirtual(f5_virtual, ip, rd):
+    log_debug(f"Creating Redirect Virtual for {f5_virtual.name} to {ip}%{rd}")
+    f5_redirect_virtual = copy.deepcopy(f5_virtual)
+    f5_redirect_virtual.name = f5_redirect_virtual.name + "__redirect"
+    f5_redirect_virtual.destination = f"{ip}%{rd}:80"
+    f5_redirect_virtual.irules = "_sys_https_redirect"
+    f5_redirect_virtual.profilesAll.clear()
+    f5_redirect_virtual.profilesClientSide.clear()
+    f5_redirect_virtual.profilesServerSide.clear()
+    f5_redirect_virtual.profilesAll.append(f"/Common/f5-tcp-progressive")
+    f5_redirect_virtual.profilesAll.append(f"/Common/http")
+    return f5_redirect_virtual
 
 def avi2bigip_http_profile(aviApplicationProfile):
 
@@ -142,13 +171,72 @@ def avi2bigip_http_profile(aviApplicationProfile):
         # Only set max header if it's above F5 Default of 64
         if aviApplicationProfile.http_profile.max_header_count > 64:
             f5_profile.maxHeaderCount = aviApplicationProfile.http_profile.max_header_count
+
+        # Avi has a lot of XFF options we don't have... so we'll likely need LTM Policies or iRules to fully implement some of this.
+        if aviApplicationProfile.http_profile.xff_enabled is True:
+            f5_profile.insertXForwardedFor = "enabled"
+
+        # Rewrite redirects from http to https:
+        if aviApplicationProfile.http_profile.server_side_redirect_to_https is True:
+            f5_profile.redirectRewrite = "all"
+
+        #For all but "ADD_NEW_XFF_HEADER" we'll need LTM Policies or iRules to fully implement.
         match aviApplicationProfile.http_profile.xff_update:
             case "ADD_NEW_XFF_HEADER":
                 f5_profile.insertXForwardedFor = "enabled"
             case "APPEND_TO_THE_XFF_HEADER":
                 f5_profile.insertXForwardedFor = "enabled"
+                log_warning("HTTP Profile: " + aviApplicationProfile.name + " Don't know how to handle xff_update = APPEND_TO_THE_XFF_HEADER.")
             case "REPLACE_XFF_HEADERS":
                 f5_profile.insertXForwardedFor = "enabled"
+                log_warning("HTTP Profile: " + aviApplicationProfile.name + " Don't know how to handle xff_update = REPLACE_XFF_HEADERS.")
+        if aviApplicationProfile.http_profile.xff_alternate_name != "X-Forwarded-For":
+            log_warning("HTTP Profile: " + aviApplicationProfile.name + " Don't know how to handle xff_alternative_name.")
+        if aviApplicationProfile.http_profile.ssl_client_certificate_mode != "SSL_CLIENT_CERTIFICATE_NONE":
+            log_warning("HTTP Profile: " + aviApplicationProfile.name + " Don't know how to handle Client Cert Auth.")
+
+    if tenantName == "admin":
+        f5_profile.partition = "Common"
+    return f5_profile
+
+def avi2bigip_serverssl_profile(aviSSLProfile):
+
+    tenantName =  f5_objects.f5_sanitize(getRefName(aviSSLProfile.tenant_ref))
+
+    f5_profile = f5_objects.ServerSSLProfile(aviSSLProfile.name) 
+    f5_profile.partition = tenantName
+
+    # Sort out allowed TLS/SSL Versions... yes, this is ugly.
+    tls1_0 = "disabled"
+    tls1_1 = "disabled"
+    tls1_2 = "disabled"
+    tls1_3 = "disabled"
+    ssl3   = "disabled"
+
+    for version in aviSSLProfile.accepted_versions:
+        if version.type == "SSL_VERSION_TLS1":
+            tls1_0 = "enabled"
+        if version.type == "SSL_VERSION_TLS1_1":
+            tls1_1 = "enabled"
+        if version.type == "SSL_VERSION_TLS1_2":
+            tls1_2 = "enabled"
+        if version.type == "SSL_VERSION_TLS1_3":
+            tls1_3 = "enabled"
+        if version.type == "SSL_VERSION_SSLV3":
+            ssl3 = "enabled"
+    ssl_options = [ "dont-insert-empty-fragments" ]
+    if ssl3 == "disabled":
+        ssl_options.append("no-sslv3")
+    if tls1_0 == "disabled":
+        ssl_options.append("no-tlsv1")
+    if tls1_1 == "disabled":
+        ssl_options.append("no-tlsv1_1")
+    if tls1_2 == "disabled":    
+        ssl_options.append("no-tlsv1_2")
+    if tls1_3 == "disabled":
+        ssl_options.append("no-tlsv1_3")
+
+    f5_profile.ciphers = aviSSLProfile.accepted_ciphers
 
     if tenantName == "admin":
         f5_profile.partition = "Common"
@@ -194,9 +282,9 @@ def avi2bigip_clientssl_profile(aviSSLProfile, aviSSLKeyAndCertificate):
     f5_profile.ciphers = aviSSLProfile.accepted_ciphers
 
     cert = aviSSLKeyAndCertificate.certificate.certificate
-    #print(f"DEBUG: Cert: {cert}")
+    log_debug(f"Cert: {cert}")
     key = aviSSLKeyAndCertificate.key
-    #print(f"DEBUG: Key: {key}")
+    log_debug(f"Key: {key}")
 
     f5_profile.certFileName = f"{f5_profile.name}.crt"
     f5_profile.certFile = cert
@@ -214,12 +302,12 @@ def avi2bigip_clientssl_profile(aviSSLProfile, aviSSLKeyAndCertificate):
             for cert in avi_config.SSLKeyAndCertificate:
                 certName = f5_objects.f5_sanitize(cert.name)
                 certTenant = f5_objects.f5_sanitize(getRefName(cert.tenant_ref))
-                #print(f"DEBUG: TESTING {caName} == {certName} and certTenant {caTenant} == {certTenant}")
+                #log_debug(f"TESTING {caName} == {certName} and certTenant {caTenant} == {certTenant}")
                 if certName == caName and certTenant == caTenant:
                     chain = chain + "\n" + cert.certificate.certificate
         f5_profile.chainFileName = f"{f5_objects.f5_sanitize(aviSSLKeyAndCertificate.ca_certs[0].name)}.crt"
         f5_profile.chainFile = chain
-        #print(f"DEBUG: ChainFileName: {f5_profile.chainFileName} Chain: {f5_profile.chainFile}") 
+        log_debug(f"ChainFileName: {f5_profile.chainFileName} Chain: {f5_profile.chainFile}") 
 
     if tenantName == "admin":
         f5_profile.partition = "Common"
@@ -282,10 +370,10 @@ def avi2bigip_monitor(monitor):
         case "HEALTH_MONITOR_PING":
             type = "gateway_icmp"
         case "HEALTH_MONITOR_EXTERNAL":
-            #log_error("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
+            log_error("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
             raise Exception("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
         case _:
-            #log_error("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
+            log_error("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
             raise Exception("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
 
     f5_monitor = f5_objects.monitor(monitor.name, type)
@@ -370,6 +458,13 @@ def avi2bigip_pool(pool):
     if pool.enabled is False:
         f5_pool.enabled = False
     
+    if hasattr(pool, 'use_service_port'): 
+        if pool.use_service_port:
+            log_warning("Pool: " + pool.name + " Don't know how to handle use_service_port: True")
+    if hasattr(pool, 'ssl_key_and_certificate_ref'): 
+        log_error("Pool: " + pool.name + " Don't know how to handle ssl_key_and_certificate_ref for mTLS on server-side")
+    if hasattr(pool, 'ssl_profile_ref'): 
+        log_error("Pool: " + pool.name + " Don't know how to handle serverside SSL on pool")
     if hasattr(pool, 'fail_action'): 
         match pool.fail_action.type:
             case "FAIL_ACTION_CLOSE_CONN":
@@ -419,18 +514,20 @@ def avi2bigip_pool(pool):
     return f5_pool
 
 def avi2bigip_virtual(virtual):
+
+    # List of F5 virtuals, this allows us to handle splitting
+    virtuals = []
+    redirectVipFound = 0
+
     if virtual.type != "VS_TYPE_NORMAL":
-        #log_error("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
+        log_error("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
         raise Exception("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
+
     tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
-    #if pool.append_port != "NEVER":
-    #    log_warning("Virtual: " + pool.name + " Don't know how to handle append_port: " + pool.append_port)
 
     if not hasattr(virtual, 'services'):
         #log_warning("Virtual: " + virtual.name + " Don't know how to handle no services on VirtualService object." )
         raise Exception("Virtual: " + virtual.name + " Don't know how to handle no services on VirtualService object." )
-    if len(virtual.services) > 1:
-        log_error("Virtual: " + virtual.name + " Don't know how to handle multiple services on VirtualService object." )
     if virtual.services[0].port != virtual.services[0].port_range_end:
         log_error("Virtual: " + virtual.name + " Don't know how to handle port range." )
     if virtual.services[0].enable_http2 == "true":
@@ -444,27 +541,57 @@ def avi2bigip_virtual(virtual):
     if virtual.use_vip_as_snat == "true":
         log_warning("Virtual: " + virtual.name + " Don't know how to handle use_vip_as_snat." )
 
+    if len(virtual.services) > 1:
+        log_error("Virtual: " + virtual.name + " Don't know how to handle multiple services on VirtualService object." )
+    destPortList = []
+    destIpList = []
+    destinationList = []
+    for service in virtual.services:
+        destPortList.append(service.port)
+
     # lookup VsVip Reference and find destination IP
     vsVipName =  getRefName(virtual.vsvip_ref)
     for vsvip in avi_config.VsVip:
         if vsvip.name == vsVipName:
-            if len(vsvip.vip) > 1:
-                log_warning("VsVip: " + vsVipName + " Don't know how to handle multiple vip objects in VsVip object." )
             ip = vsvip.vip[0].ip_address.addr
             mask = vsvip.vip[0].prefix_length 
             vrfName =  getRefName(vsvip.vrf_context_ref)
-    destination = ip + ":" + str(virtual.services[0].port)
+            routeDomainID = 0
+            for vrf in migration_config.routeDomainMapping:
+                if vrfName == vrf.vrfName:
+                    routeDomainID = vrf.rdID
+            print(vrfName)
+            # if RD is zero let it pickup default route domain from the partition.
+            if routeDomainID == 0:
+                destIpList.append(f"{ip}")
+            else:
+                destIpList.append(f"{ip}%{routeDomainID}")
+
+    # Temp Destination, will get modified if needed for multiple ip & port handling:
+    destination = f"{destIpList[0]}:{str(destPortList[0])}"
+
     if mask != 32:
-        log_warning("VsVip: " + vsVipName + " Don't know how to handle VIP with non /32 bit mask." )
+        log_warning(f"VsVip: {vsVipName} Don't know how to handle VIP with non /32 bit mask." )
 
     # Figure out pool:
     default_pool = "none"
     if hasattr(virtual, 'pool_ref'):
         # lookup pool Reference and pool name
-        default_pool =  f"/{f5_objects.f5_sanitize(getRefTenant(virtual.pool_ref))}/{f5_objects.f5_sanitize(getRefName(virtual.pool_ref))}"
-        #default_pool =  f5_objects.f5_sanitize(getRefName(virtual.pool_ref))
+        default_pool_name =  f5_objects.f5_sanitize(getRefName(virtual.pool_ref))
+        default_pool_tenant =  f5_objects.f5_sanitize(getRefTenant(virtual.pool_ref))
+        default_pool =  f"/{default_pool_tenant}/{default_pool_name}"
     if hasattr(virtual, 'pool_group_ref'):
-        log_warning("Virtual: " + virtual.name + " Don't know how to handle pool_group_ref." )
+        log_error("Virtual: " + virtual.name + " Don't know how to handle pool_group_ref." )
+
+    # Get ServerSide SSL Info:
+    serverSideSSLProfileRef = ""
+    for pool in avi_config.Pool:
+        poolTenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
+        poolName =  f5_objects.f5_sanitize(pool.name)
+        if poolTenantName == default_pool_tenant and poolName == default_pool_name:
+            log_debug(f"Found matching pool: {poolName} in tenant: {poolTenantName} looking for serverSideSSLProfileRef")
+            if hasattr(pool, 'ssl_profile_ref'): 
+                serverSideSSLProfileRef = pool.ssl_profile_ref
 
     #poolMatchCount = 0
     #for pool in f5_pools:
@@ -473,7 +600,6 @@ def avi2bigip_virtual(virtual):
     #if poolMatchCount != 1 and default_pool != "none":
     #    log_warning("Virtual: " + virtual.name + " uses pool: " + default_pool + " but there's more than one object with the same name count: " + str(poolMatchCount) + "." )
 
-    # Create F5 virtual object and Figure out Profiles:
     f5_virtual = f5_objects.virtual(virtual.name, destination, default_pool)
     f5_virtual.routeDomain = vrfName
     if tenantName != "admin":
@@ -495,16 +621,17 @@ def avi2bigip_virtual(virtual):
             networkProfileFound += 1
     
     if networkProfileFound == 0:
-        #print(f"ERROR: networkProfile: {networkProfileName} not found in networkProfileTenant {networkProfileTenant}.")
+        log_error("networkProfile: {networkProfileName} not found in networkProfileTenant {networkProfileTenant}.")
         raise Exception(f"ERROR: networkProfile: {networkProfileName} not found in networkProfileTenant {networkProfileTenant}.")
     if networkProfileFound > 1:
-        #print(f"ERROR: Multiple network profiles found networkProfile: {networkProfileName} networkProfileTenant {networkProfileTenant}.")
+        log_error("Multiple network profiles found networkProfile: {networkProfileName} networkProfileTenant {networkProfileTenant}.")
         raise Exception(f"ERROR: Multiple network profiles found networkProfile: {networkProfileName} networkProfileTenant {networkProfileTenant}.")
     
     profiles.append(f5_network_profile)
     f5_virtual.profilesAll.append(f"/{f5_network_profile.partition}/{f5_network_profile.name}")
 
     # Now Application Profile, if it has one.
+    createRedirectVips = False
     if hasattr(virtual, 'application_profile_ref'):
         applicationProfileName = getRefName(virtual.application_profile_ref)
         applicationProfileTenant = f5_objects.f5_sanitize(getRefTenant(virtual.application_profile_ref))
@@ -516,32 +643,54 @@ def avi2bigip_virtual(virtual):
                 applicationProfileFound += 1
 
         if applicationProfileFound == 0:
-            #log_error(f"ERROR: applicationProfile: {applicationProfileName} not found in applicationProfileTenant {applicationProfileTenant}.")
+            log_error(f"ERROR: applicationProfile: {applicationProfileName} not found in applicationProfileTenant {applicationProfileTenant}.")
             raise Exception(f"ERROR: applicationProfile: {applicationProfileName} not found in applicationProfileTenant {applicationProfileTenant}.")
         if applicationProfileFound > 1:
-            #log_error(f"ERROR: Multiple application profiles found applicationProfile: {applicationProfileName} applicationProfileTenant {applicationProfileTenant}.")
+            log_error(f"ERROR: Multiple application profiles found applicationProfile: {applicationProfileName} applicationProfileTenant {applicationProfileTenant}.")
             raise Exception(f"ERROR: Multiple application profiles found applicationProfile: {applicationProfileName} applicationProfileTenant {applicationProfileTenant}.")
 
-        if aviApplicationProfile.type == "APPLICATION_PROFILE_TYPE_HTTP":
-            try:
-                http_profile = avi2bigip_http_profile(aviApplicationProfile)
-            except Exception as e:
-                log_error("Application Profile: " + aviApplicationProfile.name + " not able to be converted to bigip object " + str(e))
+        match aviApplicationProfile.type:
+            case "APPLICATION_PROFILE_TYPE_HTTP":
+                try:
+                    http_profile = avi2bigip_http_profile(aviApplicationProfile)
+                except Exception as e:
+                    log_error("Application Profile: " + aviApplicationProfile.name + " not able to be converted to bigip object " + str(e))
 
-            if aviApplicationProfile.http_profile.compression_profile.compression is True:
-                log_warning("Application Profile: " + aviApplicationProfile.name + " Don't know how to handle compression." )
+                if hasattr(aviApplicationProfile, 'http_profile.compression_profile'):
+                    if aviApplicationProfile.http_profile.compression_profile.compression is True:
+                        log_warning("Application Profile: " + aviApplicationProfile.name + " Don't know how to handle compression." )
 
-            if aviApplicationProfile.http_profile.use_true_client_ip is True:
-                f5_virtual.snat = False
-                f5_virtual.snat_type = "none"
-            else:
-                f5_virtual.snat = True
-                f5_virtual.snat_type = "automap"
-            
-            profiles.append(http_profile)
-            f5_virtual.profilesAll.append(f"/{http_profile.partition}/{http_profile.name}")
+                if aviApplicationProfile.http_profile.http_to_https is True:
+                    log_debug("Application Profile: " + aviApplicationProfile.name + " Redirecting HTTP to HTTPS.")
+                    createRedirectVips = True
+    
+                if aviApplicationProfile.http_profile.use_true_client_ip is True:
+                    f5_virtual.snat = False
+                    f5_virtual.snat_type = "none"
+                else:
+                    f5_virtual.snat = True
+                    f5_virtual.snat_type = "automap"
+                
+                profiles.append(http_profile)
+                f5_virtual.profilesAll.append(f"/{http_profile.partition}/{http_profile.name}")
+            case "APPLICATION_PROFILE_TYPE_L4":
+                if aviApplicationProfile.preserve_client_ip is True:
+                    f5_virtual.snat = False
+                    f5_virtual.snat_type = "none"
+                else:
+                    f5_virtual.snat = True
+                    f5_virtual.snat_type = "automap"
+            case "APPLICATION_PROFILE_TYPE_SSL":
+                if aviApplicationProfile.preserve_client_ip is True:
+                    f5_virtual.snat = False
+                    f5_virtual.snat_type = "none"
+                else:
+                    f5_virtual.snat = True
+                    f5_virtual.snat_type = "automap"
+            case _:
+                log_warning("Application Profile: " + aviApplicationProfile.name + " Don't know how to handle type: " + aviApplicationProfile.type)
 
-    # Now SSL Profile, if it has one.
+    # Now Client SSL Profile, if it has one.
     if hasattr(virtual, 'ssl_profile_ref'):
         sslProfileName = getRefName(virtual.ssl_profile_ref)
         sslProfileTenant = f5_objects.f5_sanitize(getRefTenant(virtual.ssl_profile_ref))
@@ -553,44 +702,121 @@ def avi2bigip_virtual(virtual):
     
         sslProfileFound = 0
         for sslProfile in avi_config.SSLProfile:
+            #log_debug(f"TESTING {sslProfileName} == {sslProfile.name} and {sslProfileTenant} == {f5_objects.f5_sanitize(getRefName(sslProfile.tenant_ref))}")
             if sslProfile.name == sslProfileName and f5_objects.f5_sanitize(getRefName(sslProfile.tenant_ref)) == sslProfileTenant:
-                #print(f"DEBUG: found matching sslProfile: {sslProfileName} sslProfileTenant {sslProfileTenant}")
+                log_debug(f"found matching sslProfile: {sslProfileName} sslProfileTenant {sslProfileTenant}")
                 for sslCertProfile in avi_config.SSLKeyAndCertificate:
+                    #log_debug(f"TESTING {sslCertProfile.name} == {sslCertProfileName} and {f5_objects.f5_sanitize(getRefName(sslCertProfile.tenant_ref))} == {sslCertProfileTenant}")
                     if sslCertProfile.name == sslCertProfileName and f5_objects.f5_sanitize(getRefName(sslCertProfile.tenant_ref)) == sslCertProfileTenant:
-                        #print(f"DEBUG: found matching sslProfileCertAndKey: {sslCertProfile.name} sslProfileTenant {sslCertProfile.tenant_ref}")
+                        log_debug(f"found matching sslProfileCertAndKey: {sslCertProfile.name} sslProfileTenant {sslCertProfile.tenant_ref}")
                         try:
                             f5_clientssl_profile = avi2bigip_clientssl_profile(sslProfile, sslCertProfile)
                         except Exception as e:
                             log_error("ERROR: clientssl profile: " + sslProfileName + " " + sslCertProfileName + " not able to be converted to bigip object " + str(e))
-                            print(e)
                         sslProfileFound += 1
 
         if sslProfileFound == 0:
-            #log_error(f"ERROR: sslProfile: {sslProfileName} not found in sslProfileTenant {sslProfileTenant}.")
+            log_error(f"ERROR: sslProfile: {sslProfileName} not found in sslProfileTenant {sslProfileTenant}.")
             raise Exception(f"ERROR: sslProfile: {sslProfileName} not found in sslProfileTenant {sslProfileTenant}.")
         if sslProfileFound > 1:
-            #log_error(f"ERROR: Multiple ssl profiles found sslProfile: {sslProfileName} sslProfileTenant {sslProfileTenant}.")
+            log_error(f"ERROR: Multiple ssl profiles found sslProfile: {sslProfileName} sslProfileTenant {sslProfileTenant}.")
             raise Exception(f"ERROR: Multiple ssl profiles found sslProfile: {sslProfileName} sslProfileTenant {sslProfileTenant}.")
     
         f5_virtual.profilesClientSide.append(f"/{f5_clientssl_profile.partition}/{f5_clientssl_profile.name}")
         profiles.append(f5_clientssl_profile)
+        del sslProfileName, sslProfileTenant, sslCertProfileName, sslCertProfileTenant, sslProfileFound
+
+    # Now ServerSSL Profile, if it has one.
+    if serverSideSSLProfileRef != "":
+        log_debug(f"Virtual: {virtual.name} has serverSideSSLProfileRef: {serverSideSSLProfileRef}")
+        sslProfileName = getRefName(serverSideSSLProfileRef)
+        sslProfileTenant = f5_objects.f5_sanitize(getRefTenant(serverSideSSLProfileRef))
+    
+        sslProfileFound = 0
+        for sslProfile in avi_config.SSLProfile:
+            if sslProfile.name == sslProfileName and f5_objects.f5_sanitize(getRefName(sslProfile.tenant_ref)) == sslProfileTenant:
+                log_debug(f"found matching sslProfile: {sslProfileName} sslProfileTenant {sslProfileTenant}")
+                try:
+                    f5_serverssl_profile= avi2bigip_serverssl_profile(sslProfile)
+                except Exception as e:
+                    log_error("ERROR: ServerSSL profile: " + sslProfileName + " not able to be converted to bigip object " + str(e))
+                sslProfileFound += 1
+
+        if sslProfileFound == 0:
+            log_error(f"ERROR: ServerSide sslProfile: {sslProfileName} not found in sslProfileTenant {sslProfileTenant}.")
+            raise Exception(f"ERROR: ServerSide sslProfile: {sslProfileName} not found in sslProfileTenant {sslProfileTenant}.")
+        if sslProfileFound > 1:
+            log_error(f"ERROR: Multiple s ServerSide ssl profiles found sslProfile: {sslProfileName} sslProfileTenant {sslProfileTenant}.")
+            raise Exception(f"ERROR: Multiple ServerSide ssl profiles found sslProfile: {sslProfileName} sslProfileTenant {sslProfileTenant}.")
+    
+        f5_virtual.profilesServerSide.append(f"/{f5_serverssl_profile.partition}/{f5_serverssl_profile.name}")
+        profiles.append(f5_serverssl_profile)
+        del sslProfileName, sslProfileTenant, sslProfileFound
 
 
-    return f5_virtual, profiles
+
+    # If we have multiple destinations, copy our vip to multiple virtuals one per destination.
+    if len(destIpList) > 1:
+        for ip in destIpList:
+            ip = ip.split("%")[0]
+            rd = ip.split("%")[1]
+            # Create redirect virtuals if needed
+            if createRedirectVips:
+                f5_redirect_virtual = createRedirectVirtual(f5_virtual, ip, rd)
+                log_debug(f"Virtual: {f5_virtual.name} appending redirect to virtuals list current list contains: {len(virtuals)}.")
+                redirectVipFound += 1
+                virtuals.append(f5_redirect_virtual)
+            for port in destPortList:
+                newDestVirtual = copy.deepcopy(f5_virtual)
+                if len(destPortList) > 1:
+                    log_debug(f"VsVip: {vsVipName} MULTIPLE DESTINATIONS AND MULTIPLE PORTS building VIP for: {ip}:{port}" )
+                    newDestVirtual.name = f"{f5_virtual.name}__{ip}:{port}"
+                else:
+                    log_debug(f"VsVip: {vsVipName} MULTIPLE DESTINATIONS building VIP for: {ip}:{port}" )
+                    newDestVirtual.name = f"{f5_virtual.name}__{ip}"
+                newDestVirtual.destination = f"{ip}%{rd}:{port}"
+                virtuals.append(newDestVirtual)
+    elif len(destPortList) > 1:
+        ip = destIpList[0].split("%")[0]
+        rd = destIpList[0].split("%")[1]
+        for port in destPortList:
+            log_debug(f"VsVip: {vsVipName} MULTIPLE PORTS building VIP for: {ip}:{port}" )
+            newDestVirtual = copy.deepcopy(f5_virtual)
+            newDestVirtual.name = f"{f5_virtual.name}__{port}"
+            newDestVirtual.destination = f"{ip}%{rd}:{port}"
+            virtuals.append(newDestVirtual)
+        if createRedirectVips:
+            f5_redirect_virtual = createRedirectVirtual(f5_virtual, ip, rd)
+            log_debug(f"Virtual: {f5_virtual.name} appending redirect to virtuals list current list contains: {len(virtuals)}.")
+            redirectVipFound += 1
+            virtuals.append(f5_redirect_virtual)
+    else:
+        ip = destIpList[0].split("%")[0]
+        rd = destIpList[0].split("%")[1]
+        log_debug(f"Virtual: {f5_virtual.name} Only one DestIP and DestPort appending to virtuals list with profiles: {profiles}")
+        virtuals.append(f5_virtual)
+        if createRedirectVips:
+            f5_redirect_virtual = createRedirectVirtual(f5_virtual, ip, rd)
+            log_debug(f"Virtual: {f5_virtual.name} appending redirect to virtuals list current list contains: {len(virtuals)}.")
+            redirectVipFound += 1
+            virtuals.append(f5_redirect_virtual)
 
 
-def loadAviConfigFile(filename) -> SimpleNamespace:
-    avi_config_file = open(filename, "r")
-    avi_config = json.loads(avi_config_file.read(), object_hook=lambda d: SimpleNamespace(**d))
-    avi_config_file.close()
-    return avi_config
+    return virtuals, profiles
+
+
+def loadJsonFile(filename) -> SimpleNamespace:
+    file = open(filename, "r")
+    jsonObj = json.loads(file.read(), object_hook=lambda d: SimpleNamespace(**d))
+    file.close()
+    return jsonObj
 
 
 def writeBigIpConfig():
     try:
         f = open(args.bigipConfigFile, "w")
     except Exception as e:
-        #log_error("ERROR: problem opening file for writing. " + e)
+        log_error("ERROR: problem opening file for writing. " + e)
         raise Exception("ERROR: problem opening file for writing. " + str(e))
 
     for tenant in avi_tenants:
@@ -625,7 +851,7 @@ def writeSslFiles():
     try:
         os.makedirs(args.sslFileDir, exist_ok=True)
     except Exception as e:
-        #log_error(f"ERROR: problem creating SSL File Directory: {args.sslFileDir} " + e)
+        log_error(f"ERROR: problem creating SSL File Directory: {args.sslFileDir} " + e)
         raise Exception(f"ERROR: problem creating SSL File Directory: {args.sslFileDir} " + str(e))
 
     # string of import commands to append tmsh commands to...    
@@ -644,7 +870,7 @@ def writeSslFiles():
                     try:
                         f = open(f"{args.sslFileDir}/{profile.partition}___{profile.certFileName}", "w")
                     except Exception as e:
-                        #log_error("ERROR: problem opening file for writing. " + e)
+                        log_error("ERROR: problem opening file for writing. " + e)
                         raise Exception("ERROR: problem opening file for writing. " + str(e))
                     f.write(profile.certFile)
                     #importScriptFile.write(f"tmsh install sys crypto cert /{profile.partition}/{profile.certFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.certFileName} }}\n")
@@ -654,7 +880,7 @@ def writeSslFiles():
                     try:
                         f = open(f"{args.sslFileDir}/{profile.partition}___{profile.keyFileName}", "w")
                     except Exception as e:
-                        #log_error("ERROR: problem opening file for writing. " + e)
+                        log_error("ERROR: problem opening file for writing. " + e)
                         raise Exception("ERROR: problem opening file for writing. " + str(e))
                     f.write(profile.keyFile)
                     #importScriptFile.write(f"tmsh install sys crypto key /{profile.partition}/{profile.keyFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.keyFileName} }}\n")
@@ -664,7 +890,7 @@ def writeSslFiles():
                     try:
                         f = open(f"{args.sslFileDir}/{profile.partition}___{profile.chainFileName}", "w")
                     except Exception as e:
-                        #log_error("ERROR: problem opening file for writing. " + e)
+                        log_error("ERROR: problem opening file for writing. " + e)
                         raise Exception("ERROR: problem opening file for writing. " + str(e))
                     f.write(profile.chainFile)
                     #importScriptFile.write(f"tmsh install sys crypto cert /{profile.partition}/{profile.chainFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.chainFileName} }}\n")
@@ -675,7 +901,7 @@ def writeSslFiles():
     try:
         importScriptFile = open(f"{args.sslFileDir}/avi2bigip_ssl_file_import.sh", "w")
     except Exception as e:
-        #log_error("ERROR: problem opening file for writing. " + e)
+        log_error("ERROR: problem opening file for writing. " + e)
         raise Exception("ERROR: problem opening file for writing. " + str(e))
 
     for partition in partitionList:
@@ -689,10 +915,36 @@ def main() -> int:
 
     global avi_config
     try:
-        avi_config = loadAviConfigFile(args.aviJsonFile)
+        avi_config = loadJsonFile(args.aviJsonFile)
     except Exception as e:
         log_error("ERROR: problem loading Avi JSON Configuration. " + str(e))
         return 1
+
+    global migration_config
+    try:
+        migration_config = loadJsonFile(args.migrationConfigFile)
+    except Exception as e:
+        log_error("ERROR: problem loading Migration Config JSON File. " + str(e))
+        return 1
+
+    if args.debug:
+        print("DEBUGGING ENAABLED")
+        logging.basicConfig(
+         filename=args.logFile, 
+            level=logging.DEBUG,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+    else:
+        logging.basicConfig(
+         filename=args.logFile, 
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+
+    aviVipCount = 0
+    f5VipCount = 0
 
     global avi_tenants
     avi_tenants = []
@@ -701,7 +953,6 @@ def main() -> int:
     f5_partitions = []
 
     f5_routeDomains = []
-    routeDomainCount = 10
     
     for tenant in avi_config.Tenant:
         f5_partition = f5_objects.partition(tenant.name)
@@ -718,13 +969,17 @@ def main() -> int:
         cloud = getRefName(vrf.cloud_ref)
         if cloud != args.aviCloud:
             continue
+        vrfName = vrf.name
         vrfTenantName =  getRefName(vrf.tenant_ref)
-        f5_routeDomain = f5_objects.routeDomain(vrf.name, routeDomainCount)
-        routeDomainCount = routeDomainCount + 10
+        routeDomainID = 0
+        for vrf in migration_config.routeDomainMapping:
+            if vrfName == vrf.vrfName:
+                routeDomainID = vrf.rdID
+        f5_routeDomain = f5_objects.routeDomain(vrfName, routeDomainID)
         if hasattr(vrf, 'description'): 
             f5_routeDomain.description = vrf.description
         for tenant in avi_tenants:
-            if tenant.name == vrf.name:
+            if tenant.name == vrf.vrfName:
                 tenant.defaultRouteDomain = f5_routeDomain.id
         f5_routeDomains.append(f5_routeDomain)
     
@@ -733,6 +988,8 @@ def main() -> int:
     
     for monitor in avi_config.HealthMonitor:
         tenantName =  f5_objects.f5_sanitize(getRefName(monitor.tenant_ref))
+        if args.aviTenant != "all" and tenantName != args.aviTenant:
+            continue
         if tenantName == "admin":
             tenantName = "Common"
     
@@ -763,6 +1020,8 @@ def main() -> int:
         cloudName = getRefName(pool.cloud_ref)
         if cloudName != args.aviCloud:
             continue
+        if args.aviTenant != "all" and tenantName != args.aviTenant:
+            continue
         try:
             f5_pool = avi2bigip_pool(pool)
         except Exception as e:
@@ -787,28 +1046,39 @@ def main() -> int:
         cloudName = getRefName(virtual.cloud_ref)
         if cloudName != args.aviCloud:
             continue
+        if args.aviTenant != "all" and tenantName != args.aviTenant:
+            continue
+        aviVipCount += 1
         try:
-            f5_virtual, profiles = avi2bigip_virtual(virtual)
+            virtuals, profiles = avi2bigip_virtual(virtual)
         except Exception as e:
             log_error("virtual: " + virtual.name + " not able to be converted to bigip object " + str(e))
             continue
         addedToTenant = 0
 
+        # If we get two virtuals back... then one must be a redirect, add a avi vip count to keep us honest.
+        if len(virtuals) == 2:
+            aviVipCount += 1
+        if len(virtuals) > 2:
+            log_error("Virtual: Got back more than 2 virtuals, not sure how to handle this.")
+
         # we get one vip back, and we know what partition it goes in, so simply add it...
         for tenant in avi_tenants:
             if tenant.name == tenantName:
-                tenant.f5_virtuals.append(f5_virtual)
-                addedToTenant += 1
+                for f5_virtual in virtuals:
+                    tenant.f5_virtuals.append(f5_virtual)
+                    addedToTenant += 1
+                    f5VipCount += 1
 
         # we get multiple profiles back, and need to add them to the correct tenant/partition.
         for profile in profiles:
-            #print(f"DEBUG: TESTING Profile: {profile.name} with Partition: {profile.partition} against tenant: {tenant.name}")
+            #log_debug(f"TESTING Profile: {profile.name} with Partition: {profile.partition} against tenant: {tenant.name}")
             profileAddedToTenant = 0
             for tenant in avi_tenants:
                 if tenant.name == "admin":
                     tenant.name = "Common"
                 if tenant.name == profile.partition:
-                    #print(f"DEBUG: Adding Profile: {profile.name} {profile.type} to tenant: {tenant.name}")
+                    log_debug(f"Adding Profile: {profile.name} {profile.type} to tenant: {tenant.name}")
                     profileExists = 0
                     # Check if the profile alread exists in the tenant...
                     for testProfile in tenant.f5_profiles:
@@ -828,7 +1098,7 @@ def main() -> int:
             addedToTenant = 0
     
         #cleanup vars:
-        del tenantName, addedToTenant, f5_virtual
+        del tenantName, addedToTenant, virtuals, profiles
     
     #print("Avi Tenants:")
     #pprintpp.pprint(avi_tenants)
@@ -845,6 +1115,12 @@ def main() -> int:
         log_error("ERROR: problem writing SSL Files." + str(e))
         return 1
 
+    print("###############")
+    print("### SUMMARY ###")
+    print("###############")
+    print(f"Found Avi Vip Count: {aviVipCount}")
+    print(f"Created F5 Vip Count: {f5VipCount}")
+
     return 0
 
 
@@ -855,10 +1131,14 @@ if __name__ == '__main__':
     # ArgeParse stuff:
     parser = argparse.ArgumentParser(description="Convert Avi JSON Configuration to BIG-IP Configuration")
     parser.add_argument("aviJsonFile", action="store", help="Avi JSON Configuration File")
-    parser.add_argument("-c", "--avi-cloud", action="store", dest="aviCloud", default="VM-Default-Cloud")
-    parser.add_argument("-t", "--avi-tenant", action="store", dest="aviTenant", default="all")
-    parser.add_argument("-b", "--bigip-conf", action="store", dest="bigipConfigFile", default="avi_bigip_for_merge.conf")
-    parser.add_argument("-d", "--ssl-file-dir", action="store", dest="sslFileDir", default="")
+    parser.add_argument("-c", "--avi-cloud", action="store", dest="aviCloud", default="VM-Default-Cloud", help="Avi Cloud to convert")
+    parser.add_argument("-t", "--avi-tenant", action="store", dest="aviTenant", default="all", help="Avi Tenant to convert")
+    parser.add_argument("-b", "--bigip-conf", action="store", dest="bigipConfigFile", default="avi_bigip_for_merge.conf", help="BIG-IP Configuration File destination")
+    parser.add_argument("-m", "--migration-conf", action="store", dest="migrationConfigFile", default="config.json", help="Configuration File for Migration")
+    parser.add_argument("-s", "--ssl-file-dir", action="store", dest="sslFileDir", default="", help="File Directory to dump SSL certs/keys into")
+    parser.add_argument("-f", "--log-file", action="store", dest="logFile", default="avi_bigip_for_merge.log", help="Log Path/Filename")
+    parser.add_argument("-l", "--log", action=argparse.BooleanOptionalAction, dest="logToFile", default=False, help="Log to file instead of stderr")
+    parser.add_argument("-d", "--debug", action=argparse.BooleanOptionalAction, dest="debug", default=False, help="debug logging")
     global args
     args = parser.parse_args()
 

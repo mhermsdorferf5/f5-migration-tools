@@ -1,0 +1,24 @@
+{
+  "routeDomainMapping": [
+    {
+      "vrfName": "EXTERNAL",
+      "rdID": 10
+    },
+    {
+      "vrfName": "INTERNAL",
+      "rdID": 11
+    },
+    {
+      "vrfName": "FOO",
+      "rdID": 12
+    },
+    {
+      "vrfName": "BAR",
+      "rdID": 13
+    },
+    {
+      "vrfName": "FOOBAR",
+      "rdID": 19
+    }
+  ]
+}
