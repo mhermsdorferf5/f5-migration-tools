@@ -463,8 +463,6 @@ def avi2bigip_pool(pool):
             log_warning("Pool: " + pool.name + " Don't know how to handle use_service_port: True")
     if hasattr(pool, 'ssl_key_and_certificate_ref'): 
         log_error("Pool: " + pool.name + " Don't know how to handle ssl_key_and_certificate_ref for mTLS on server-side")
-    if hasattr(pool, 'ssl_profile_ref'): 
-        log_error("Pool: " + pool.name + " Don't know how to handle serverside SSL on pool")
     if hasattr(pool, 'fail_action'): 
         match pool.fail_action.type:
             case "FAIL_ACTION_CLOSE_CONN":
