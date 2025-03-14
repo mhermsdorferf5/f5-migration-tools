@@ -61,7 +61,7 @@ from urllib.parse import urlparse, parse_qs
 import re
 import argparse
 import logging
-import datetime
+import traceback
 
 
 class avi_tenant:
@@ -83,7 +83,7 @@ class avi_tenant:
         for pool in self.f5_pools:
             poolString += f"\n\t\t{pool}"
         poolString += "]"
-        return f"avi_tenant(name='{self.name}', defaultRouteDomain='{self.defaultRouteDomain}' description='{self.description}', \n\tpools='{poolString}', \n\tvirtuals='{virtualString}')"
+        return f"avi_tenant(name='{self.name}', defaultRouteDomain='{self.defaultRouteDomain}' description='{self.description}', \n\tf5_pools='{poolString}', \n\tf5_virtuals='{virtualString}')"
 
 
 def usage ():
@@ -145,12 +145,38 @@ def generateCertKeyFile(name, obj, type):
     if type == "key":
         f.write(obj.key)
 
+def addPoolToTenant(pool):
+    log_debug(f"Attempting Adding Pool: {pool.name} to tenant {pool.partition}")
+    poolTenantName = pool.partition
+    addedPoolToTenant = 0
+    for tenant in avi_tenants:
+        tenantName = f5_objects.f5_sanitize(tenant.name)
+        if tenantName == "admin":
+            tenantName = "Common"
+        if tenantName == poolTenantName:
+            log_debug(f"Adding Pool: FOUND TENANT {tenantName} for {pool.name} tenant contains {len(tenant.f5_pools)} pools.")
+            if len(tenant.f5_pools) > 0:
+                for f5_pool in tenant.f5_pools:
+                    log_debug(f"Adding Pool: {pool.name} testing against {f5_pool.name} before adding to tenant {poolTenantName}.")
+                    if f5_pool.name == pool.name:
+                        log_warning("Adding Pool: " + pool.name + " already exists in tenant: " + tenant.name)
+                        addedPoolToTenant = 1
+            if addedPoolToTenant == 0:
+                log_debug(f"Adding Pool: {pool.name} appending pool to {tenant.name}.")
+                tenant.f5_pools.append(pool)
+                addedPoolToTenant = 1
+                break
+    if addedPoolToTenant == 0:
+        log_error("Adding Pool: " + pool.name + " not added to any tenant, no tenant found for: " + pool.partition)
+        return 0
+    return 1
+                    
 def createRedirectVirtual(f5_virtual, ip, rd):
     log_debug(f"Creating Redirect Virtual for {f5_virtual.name} to {ip}%{rd}")
     f5_redirect_virtual = copy.deepcopy(f5_virtual)
     f5_redirect_virtual.name = f5_redirect_virtual.name + "__redirect"
     f5_redirect_virtual.destination = f"{ip}%{rd}:80"
-    f5_redirect_virtual.irules = "_sys_https_redirect"
+    f5_redirect_virtual.irules.append("/Common/_sys_https_redirect")
     f5_redirect_virtual.profilesAll.clear()
     f5_redirect_virtual.profilesClientSide.clear()
     f5_redirect_virtual.profilesServerSide.clear()
@@ -430,7 +456,7 @@ def avi2bigip_monitor(monitor):
 
 def avi2bigip_poolGroup(poolGroup):
     poolGroupName = f"{f5_objects.f5_sanitize(poolGroup.name)}_poolGroup"
-    tenantName =  f5_objects.f5_sanitize(getRefName(poolGroup.tenant_ref))
+    poolGroupTenantName =  f5_objects.f5_sanitize(getRefName(poolGroup.tenant_ref))
 
     f5_members = []
     vrfName = ""
@@ -442,6 +468,10 @@ def avi2bigip_poolGroup(poolGroup):
         for pool in avi_config.Pool:
             poolName =  f5_objects.f5_sanitize(pool.name)
             tenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
+            routeDomainID = 0
+            for vrf in migration_config.routeDomainMapping:
+                if vrfName == vrf.vrfName:
+                    routeDomainID = vrf.rdID
             if subPoolName == poolName and subPoolTenant == tenantName:
                 if hasattr(pool, 'ssl_profile_ref'): 
                     if serverSideSSLProfileRef == "":
@@ -457,8 +487,12 @@ def avi2bigip_poolGroup(poolGroup):
                                 member.ip.addr = member.hostname
                             if hasattr(member, 'port'):
                                 f5_member = f5_objects.pool_member(member.ip.addr, member.port)
+                                f5_member.routeDomain = routeDomainID
+                                f5_member.partition = tenantName
                             else:
                                 f5_member = f5_objects.pool_member(member.ip.addr, pool.default_server_port)
+                                f5_member.routeDomain = routeDomainID
+                                f5_member.partition = tenantName
                             if member.ratio != 1:
                                 f5_member.ratio = member.ratio
                             if member.enabled != "true":
@@ -470,15 +504,20 @@ def avi2bigip_poolGroup(poolGroup):
         tenantName = "Common"
 
     f5_pool = f5_objects.pool(poolGroupName, f5_members )
+    f5_pool.partition = poolGroupTenantName
     f5_pool.routeDomain = vrfName
     f5_pool.minActiveMembers = poolGroup.min_servers
-
+    
     return f5_pool, serverSideSSLProfileRef
 
 
 def avi2bigip_pool(pool):
     tenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
     vrfName    =  getRefName(pool.vrf_ref)
+    routeDomainID = 0
+    for vrf in migration_config.routeDomainMapping:
+        if vrfName == vrf.vrfName:
+            routeDomainID = vrf.rdID
     cloudName = getRefName(pool.cloud_ref)
     if pool.pool_type != "POOL_TYPE_GENERIC_APP":
         log_error("Pool: " + pool.name + " Don't know how to handle pool_type: " + pool.pool_type )
@@ -492,8 +531,12 @@ def avi2bigip_pool(pool):
                 member.ip.addr = member.hostname
             if hasattr(member, 'port'): 
                 f5_member = f5_objects.pool_member(member.ip.addr, member.port)
+                f5_member.routeDomain = routeDomainID
+                f5_member.partition = tenantName
             else:
                 f5_member = f5_objects.pool_member(member.ip.addr, pool.default_server_port)
+                f5_member.routeDomain = routeDomainID
+                f5_member.partition = tenantName
             if member.ratio != 1:
                 f5_member.ratio = member.ratio
             if member.enabled != "true":
@@ -636,41 +679,35 @@ def avi2bigip_virtual(virtual):
                 except Exception as e:
                     log_error("Pool: " + pool.name + " not able to be converted to bigip object " + str(e))
                     continue
-                addedPoolToTenant = 0
-                for tenant in avi_tenants:
-                    if tenant.name == poolTenantName:
-                        tenant.f5_pools.append(f5_pool)
-                        addedPoolToTenant = 1
-                if addedPoolToTenant == 0:
-                    log_error("Pool: " + pool.name + " not added to any tenant, no tenant found for: " + tenant.name)
+                addedPoolToTenant = addPoolToTenant(f5_pool)
+                if addedPoolToTenant == 1:
+                    log_debug("Virtual: added pool " + f5_pool.name + " added to tenant: " + f5_pool.partition)
                 break
         # Add Pool to Virtual Config:
         default_pool =  f"/{default_pool_tenant}/{default_pool_name}"
+        
     if hasattr(virtual, 'pool_group_ref'):
-        default_pool_name =  f5_objects.f5_sanitize(getRefName(virtual.pool_group_ref))
-        default_pool_tenant =  f5_objects.f5_sanitize(getRefTenant(virtual.pool_group_ref))
-        for pool in avi_config.PoolGroup:
-            poolName =  f5_objects.f5_sanitize(pool.name)
-            poolTenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
-            if poolName != default_pool_name and poolTenantName != default_pool_tenant:
-                if poolTenantName == "admin":
-                    poolTenantName = "Common"
+        default_poolGroup_name =  f5_objects.f5_sanitize(getRefName(virtual.pool_group_ref))
+        default_poolGroup_tenant =  f5_objects.f5_sanitize(getRefTenant(virtual.pool_group_ref))
+        for poolGroup in avi_config.PoolGroup:
+            poolGroupName =  f5_objects.f5_sanitize(poolGroup.name)
+            poolGroupTenantName =  f5_objects.f5_sanitize(getRefName(poolGroup.tenant_ref))
+            if poolGroupName == default_poolGroup_name and poolGroupTenantName == default_poolGroup_tenant:
+                if poolGroupTenantName == "admin":
+                    poolGroupTenantName = "Common"
                 try:
-                    f5_pool, serverSideSSLProfileRef = avi2bigip_poolGroup(pool)
+                    f5_pool, serverSideSSLProfileRef = avi2bigip_poolGroup(poolGroup)
                 except Exception as e:
-                    log_error("Pool Group: " + pool.name + " not able to be converted to bigip object " + str(e))
+                    log_error("Pool Group: " + poolGroup.name + " not able to be converted to bigip object " + str(e))
                     continue
-                addedPoolToTenant = 0
-                for tenant in avi_tenants:
-                    if tenant.name == poolTenantName:
-                        tenant.f5_pools.append(f5_pool)
-                        addedPoolToTenant = 1
-                if addedPoolToTenant == 0:
-                    log_error("Pool: " + pool.name + " not added to any tenant, no tenant found for: " + tenant.name)
-                break
-        # Add Pool to Virtual Config:
-        default_pool =  f"/{default_pool_tenant}/{default_pool_name}"
-
+                # Update name to grab new pool name
+                default_poolGroup_name =  f5_pool.name
+                default_poolGroup_tenant =  f5_pool.partition
+                # Add Pool to Virtual Config:
+                default_pool =  f"/{default_poolGroup_tenant}/{default_poolGroup_name}"
+                addedPoolToTenant = addPoolToTenant(f5_pool)
+                if addedPoolToTenant == 1:
+                    log_debug("Pool: " + f5_pool.name + " added to tenant: " + f5_pool.partition)
 
     f5_virtual = f5_objects.virtual(virtual.name, destination, default_pool)
     f5_virtual.routeDomain = vrfName
@@ -1057,9 +1094,6 @@ def main() -> int:
                 tenant.defaultRouteDomain = f5_routeDomain.id
         f5_routeDomains.append(f5_routeDomain)
     
-    #pprintpp.pprint(avi_vrfs)
-    #pprintpp.pprint(avi_tenants)
-    
     for monitor in avi_config.HealthMonitor:
         tenantName =  f5_objects.f5_sanitize(getRefName(monitor.tenant_ref))
         if args.aviTenant != "all" and tenantName != args.aviTenant:
@@ -1098,7 +1132,10 @@ def main() -> int:
         try:
             virtuals, profiles = avi2bigip_virtual(virtual)
         except Exception as e:
-            log_error("virtual: " + virtual.name + " not able to be converted to bigip object " + str(e))
+            if args.debug:
+                log_error("virtual: " + virtual.name + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
+            else:
+                log_error("virtual: " + virtual.name + " not able to be converted to bigip object " + str(e) )
             continue
         addedToTenant = 0
 
