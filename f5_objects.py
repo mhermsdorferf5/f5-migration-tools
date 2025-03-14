@@ -332,6 +332,8 @@ class pool_member:
         self.enabled = True
         self.ratio = 1
         self.priority = 0
+        self.partition = "Common"
+        self.routeDomain = 0
 
     def __str__(self):
         return f"bigip_pool_member(name='{self.name}', dest='{self.dest}', port='{self.port}')"
@@ -340,13 +342,13 @@ class pool_member:
 
     def tmos_obj(self):
         if re.match(r'\d+\.\d+\.\d+\.\d+', self.dest):
-            return f"""        /Common/{self.name}:{self.port} {{
+            return f"""        /{self.partition}/{self.name}%{self.routeDomain}:{self.port} {{
             address {self.dest}
             ratio {self.ratio}
             priority {self.priority}
         }}"""
         else:
-            return f"""        /Common/{self.name}:{self.port} {{
+            return f"""        /{self.partition}/{self.name}%{self.routeDomain}:{self.port} {{
             fqdn {{ name {self.dest} }}
             ratio {self.ratio}
             priority {self.priority}
@@ -441,7 +443,7 @@ class virtual(bigip_obj):
         self.snat = True
         self.snatType = "automap"
         self.snatPoolName = ""
-        self.irules = "none"
+        self.irules = []
 
 
     @property
@@ -478,9 +480,16 @@ class virtual(bigip_obj):
     source-address-translation {{
         type automap
     }}"""
+        if len(self.irules) > 0:
+            rulesStr = "none"
+        else:
+            rulesStr = "{ "
+            for rule in self.irules:
+                rulesStr += f"{rule} "
+            rulesStr += "}"
         return f"""ltm virtual /{self.partition}/{self.name} {{
     destination {self.destination}
     pool {self.default_pool}
     profiles {{ {profiles}    }} {snatConfig}
-    rules {self.irules}
+    rules {rulesStr}
 }}"""
