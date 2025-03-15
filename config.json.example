@@ -1,0 +1,44 @@
+{
+  "routeDomainMapping": [
+    {
+      "vrfName": "FOO",
+      "rdID": 20
+    },
+    {
+      "vrfName": "BAR",
+      "rdID": 10
+    },
+    {
+      "vrfName": "FOOBAR",
+      "rdID": 11
+    }
+  ],
+  "partitionDefaultRoutDomain": [
+    {
+      "partitionName": "FOO",
+      "rdID": 20
+    },
+    {
+      "partitionName": "BAR",
+      "rdID": 10
+    },
+    {
+      "partitionName": "FOOBAR",
+      "rdID": 11
+    },
+    {
+      "partitionName": "INTERNET",
+      "rdID": 100
+    }
+  ],
+  "cipherStringMapping": [
+    {
+      "aviCipher": "ecdhe-rsa-aes256-sha",
+      "f5Cipher": "ECDHE-RSA-AES256-SHA384"
+    },
+    {
+      "aviCipher": "ecdhe-rsa-aes128-sha",
+      "f5Cipher": "ECDHE-RSA-AES128-SHA256"
+    }
+  ]
+}
