@@ -1,11 +1,42 @@
 import re;
 from enum import Enum;
 
+bannedObjNames = [
+    "apm-forwarding-client-tcp",
+    "apm-forwarding-server-tcp",
+    "f5-tcp-lan",
+    "f5-tcp-mobile",
+    "f5-tcp-progressive",
+    "f5-tcp-wan",
+    "mptcp-mobile-optimized",
+    "splitsession-default-tcp",
+    "tcp",
+    "tcp-lan-optimized",
+    "tcp-legacy",
+    "tcp-mobile-optimized",
+    "tcp-wan-optimized",
+    "wom-tcp-lan-optimized",
+    "wom-tcp-wan-optimized",
+    "udp",
+    "udp_decrement_ttl",
+    "udp_gtm_dns",
+    "udp_preserve_ttl",
+    "apm-forwarding-fastL4",
+    "fastL4",
+    "full-acceleration",
+    "security-fastL4",
+    "http",
+    "http-explicit",
+    "http-transparent",
+]
+
 def f5_sanitize(name):
     clean_name = name.replace("%20", "_")
     clean_name = clean_name.replace("%2A", "wildcard")
     clean_name = clean_name.replace(" ", "_")
     #clean_name = clean_name.replace("-", "_")
+    if clean_name in bannedObjNames:
+        return "object_" + clean_name
     if re.match(r'^[a-zA-Z/]', clean_name):
         #return clean_name.lower()
         return clean_name
@@ -40,7 +71,7 @@ class httpProfile:
         self.maxHeaderSize = 32768
         self.insertXFF = "enabled"
         self.acceptXFF = "disabled"
-        self.xffAlternativeNames = ""
+        self.xffAlternativeNames = "none"
         self.oneconnectTransformations = "enabled"
         self.redirectRewrite = "none"
 
@@ -83,7 +114,7 @@ class ServerSSLProfile:
         self.type = "server-ssl"
         self.partition = "Common"
         self.options = [ "dont-insert-empty-fragments", "no-ssl", "no-dtls", "no-tlsv1.3", "no-tlsv1"]
-        self.ciphers = "DEFAULT"
+        self.ciphers = [ "DEFAULT" ]
         self.certFileName = ""
         self.certFile = ""
         self.keyFileName = ""
@@ -118,11 +149,17 @@ class ServerSSLProfile:
         for option in self.options:
             optionsStr += f"{option} "
         certKeyChainName = re.sub('.crt', '', self.certFileName)
+        cipherString = ""
+        for i in range(len(self.ciphers)):
+            if i == 0:
+                cipherString += f"{self.ciphers[i]}"
+            else:
+                cipherString += f":{self.ciphers[i]}"
         return f"""ltm profile server-ssl /{self.partition}/{self.name} {{
     defaults-from serverssl
     {certKeyChainStr}
-    ciphers {self.ciphers}
     options {{ {optionsStr} }}
+    ciphers {cipherString}
 }}"""
 class ClientSSLProfile:
     description = "LTM ClientSSL Profile"
@@ -132,12 +169,12 @@ class ClientSSLProfile:
         self.type = "client-ssl"
         self.partition = "Common"
         self.options = [ "dont-insert-empty-fragments", "no-ssl", "no-dtls", "no-tlsv1.3", "no-tlsv1"]
-        self.ciphers = "DEFAULT"
-        self.certFileName = ""
+        self.ciphers = [ "DEFAULT" ]
+        self.certFileName = "default.crt"
         self.certFile = ""
-        self.keyFileName = ""
+        self.keyFileName = "default.key"
         self.keyFile = ""
-        self.chainFileName = ""
+        self.chainFileName = "none"
         self.chainFile = ""
         self.caFileName = ""
         self.caFile = ""
@@ -158,16 +195,34 @@ class ClientSSLProfile:
         for option in self.options:
             optionsStr += f"{option} "
         certKeyChainName = re.sub('.crt', '', self.certFileName)
+        if self.chainFileName == "none":
+            chainObjName = "none"
+        else:
+            chainObjName = f"/{self.partition}/{self.chainFileName}"
+        if self.certFileName == "default.crt":
+            certObjName = "/Common/default.crt"
+        else:
+            certObjName = f"/{self.partition}/{self.certFileName}"
+        if self.keyFileName == "default.key":
+            keyObjName = "/Common/default.key"
+        else:
+            keyObjName = f"/{self.partition}/{self.keyFileName}"
+        cipherString = ""
+        for i in range(len(self.ciphers)):
+            if i == 0:
+                cipherString += f"{self.ciphers[i]}"
+            else:
+                cipherString += f":{self.ciphers[i]}"
         return f"""ltm profile client-ssl /{self.partition}/{self.name} {{
     defaults-from clientssl
     cert-key-chain {{
         {certKeyChainName} {{
-            cert {self.certFileName}
-            key {self.keyFileName}
-            chain {self.chainFileName}
+            cert {certObjName}
+            key {keyObjName}
+            chain {chainObjName}
         }}
     }}
-    ciphers {self.ciphers}
+    ciphers {cipherString}
     options {{ {optionsStr} }}
 }}"""
 
@@ -318,7 +373,7 @@ class routeDomain(bigip_obj):
 
     def tmos_obj(self):
         return f"""net route-domain {self.name} {{
-    id {self.defaultRouteDomain}
+    id {self.id}
     description "{self.description}"
 }}"""
 
@@ -343,15 +398,15 @@ class pool_member:
     def tmos_obj(self):
         if re.match(r'\d+\.\d+\.\d+\.\d+', self.dest):
             return f"""        /{self.partition}/{self.name}%{self.routeDomain}:{self.port} {{
-            address {self.dest}
+            address {self.dest}%{self.routeDomain}
             ratio {self.ratio}
-            priority {self.priority}
+            priority-group {self.priority}
         }}"""
         else:
-            return f"""        /{self.partition}/{self.name}%{self.routeDomain}:{self.port} {{
+            return f"""        /{self.partition}/{self.name}:{self.port} {{
             fqdn {{ name {self.dest} }}
             ratio {self.ratio}
-            priority {self.priority}
+            priority-group {self.priority}
         }}"""
 
 
@@ -435,7 +490,7 @@ class virtual(bigip_obj):
         self.destination = destination
         self.default_pool = f5_sanitize(default_pool)
         self.rotueDomain = "0"
-        self.profilesAll = ["/Common/f5-tcp-progressive"]
+        self.profilesAll = [ ]
         self.profilesClientSide = [ ]
         self.profilesServerSide = [ ]
         self.partition = "Common"
