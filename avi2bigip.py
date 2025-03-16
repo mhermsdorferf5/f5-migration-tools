@@ -891,42 +891,32 @@ def avi2bigip_virtual(virtual):
         f5_virtual.profilesServerSide.append(f"/{f5_serverssl_profile.partition}/{f5_serverssl_profile.name}")
         profiles.append(f5_serverssl_profile)
 
-
-
-    # If we have multiple destinations, copy our vip to multiple virtuals one per destination.
-    if len(destIpList) > 1:
-        for ip in destIpList:
-            ip = ip.split("%")[0]
-            rd = ip.split("%")[1]
-            # Create redirect virtuals if needed
-            if createRedirectVips:
-                # Check to see if we already have a VIP on port 80 first..
-                if "80" in destPortList or 80 in destPortList:
-                    log_error(f"Virtual: {f5_virtual.name} has multiple destinations and port 80 already exists, can't create redirect VIP.")
-                else:
-                    f5_redirect_virtual = createRedirectVirtual(f5_virtual, ip, rd)
-                    log_debug(f"Virtual: {f5_virtual.name} appending redirect to virtuals list current list contains: {len(virtuals)}.")
-                    redirectVipFound += 1
-                    virtuals.append(f5_redirect_virtual)
-            for port in destPortList:
+    # If we have multiple destinations and/or multiple ports, copy our vip to multiple virtuals one per destination port combo.
+    for ip in destIpList:
+        rd = ip.split("%")[1]
+        ip = ip.split("%")[0]
+        for port in destPortList:
+            if len(destPortList) > 1 and len(destIpList) > 1:
                 newDestVirtual = copy.deepcopy(f5_virtual)
-                if len(destPortList) > 1:
-                    log_debug(f"VsVip: {virtual.vsvip_ref} MULTIPLE DESTINATIONS AND MULTIPLE PORTS building VIP for: {ip}:{port}" )
-                    newDestVirtual.name = f"{f5_virtual.name}__{ip}:{port}"
-                else:
-                    log_debug(f"VsVip: {virtual.vsvip_ref} MULTIPLE DESTINATIONS building VIP for: {ip}:{port}" )
-                    newDestVirtual.name = f"{f5_virtual.name}__{ip}"
+                log_debug(f"VsVip: {virtual.vsvip_ref} MULTIPLE DESTINATIONS MULTIPLE PORTS building VIP for: {ip}:{port}" )
+                newDestVirtual.name = f"{f5_virtual.name}__{ip}:{port}"
                 newDestVirtual.destination = f"{ip}%{rd}:{port}"
                 virtuals.append(newDestVirtual)
-    elif len(destPortList) > 1:
-        ip = destIpList[0].split("%")[0]
-        rd = destIpList[0].split("%")[1]
-        for port in destPortList:
-            log_debug(f"VsVip: {virtual.vsvip_ref} MULTIPLE PORTS building VIP for: {ip}:{port}" )
-            newDestVirtual = copy.deepcopy(f5_virtual)
-            newDestVirtual.name = f"{f5_virtual.name}__{port}"
-            newDestVirtual.destination = f"{ip}%{rd}:{port}"
-            virtuals.append(newDestVirtual)
+            elif len(destPortList) == 1 and len(destIpList) > 1:
+                newDestVirtual = copy.deepcopy(f5_virtual)
+                log_debug(f"VsVip: {virtual.vsvip_ref} MULTIPLE DESTINATIONS SINGLE PORT building VIP for: {ip}:{port}" )
+                newDestVirtual.name = f"{f5_virtual.name}__{ip}"
+                newDestVirtual.destination = f"{ip}%{rd}:{port}"
+                virtuals.append(newDestVirtual)
+            elif len(destPortList) > 1 and len(destIpList) == 1:
+                newDestVirtual = copy.deepcopy(f5_virtual)
+                log_debug(f"VsVip: {virtual.vsvip_ref} SINGLE DESTINATION MULTIPLE PORT building VIP for: {ip}:{port}" )
+                newDestVirtual.name = f"{f5_virtual.name}__{port}"
+                newDestVirtual.destination = f"{ip}%{rd}:{port}"
+                virtuals.append(newDestVirtual)
+            else:
+                log_debug(f"VsVip: {virtual.vsvip_ref} SINGLE DESTINATION SINGLE PORT building VIP for: {ip}:{port}" )
+                virtuals.append(f5_virtual)
         if createRedirectVips:
             # Check to see if we already have a VIP on port 80 first..
             if "80" in destPortList or 80 in destPortList:
@@ -936,18 +926,7 @@ def avi2bigip_virtual(virtual):
                 log_debug(f"Virtual: {f5_virtual.name} appending redirect to virtuals list current list contains: {len(virtuals)}.")
                 redirectVipFound += 1
                 virtuals.append(f5_redirect_virtual)
-    else:
-        ip = destIpList[0].split("%")[0]
-        rd = destIpList[0].split("%")[1]
-        log_debug(f"Virtual: {f5_virtual.name} Only one DestIP and DestPort appending to virtuals list with profiles: {profiles}")
-        virtuals.append(f5_virtual)
-        if createRedirectVips:
-            f5_redirect_virtual = createRedirectVirtual(f5_virtual, ip, rd)
-            log_debug(f"Virtual: {f5_virtual.name} appending redirect to virtuals list current list contains: {len(virtuals)}.")
-            redirectVipFound += 1
-            virtuals.append(f5_redirect_virtual)
-
-
+        
     return virtuals, profiles
 
 
@@ -1185,20 +1164,19 @@ def main() -> int:
                 log_error("virtual: " + virtual.name + " not able to be converted to bigip object " + str(e) )
             continue
         addedToTenant = 0
-
-        # If we get two virtuals back... then one must be a redirect, add a avi vip count to keep us honest.
-        if len(virtuals) == 2:
-            aviVipCount += 1
-        if len(virtuals) > 2:
-            log_error("Virtual: Got back more than 2 virtuals, not sure how to handle this.")
+       
+        # Because we create a F5 virtual for every destination/port add to the avi count
+        # for each additional virtual we get back beyond the 1 expected. 
+        if len(virtuals) > 1:
+            aviVipCount += len(virtuals) - 1
 
         # we get one vip back, and we know what partition it goes in, so simply add it...
         for tenant in avi_tenants:
             if tenant.name == tenantName:
                 for f5_virtual in virtuals:
+                    f5VipCount += 1
                     tenant.f5_virtuals.append(f5_virtual)
                     addedToTenant += 1
-                    f5VipCount += 1
 
         # we get multiple profiles back, and need to add them to the correct tenant/partition.
         for profile in profiles:
