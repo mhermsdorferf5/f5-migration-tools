@@ -10,8 +10,12 @@ This was built with configruation exported from a version 22.1.6 controller.  No
 
 * Virtual Services:
   * Only VS_TYPE_NORMAL is currently supported
-  * No support for http_policy rules (controller rules nor content switching)
+  * HTTP Policies are not supported (no content switching)
   * Only HTTP and L4 type VIPs currently supported.
+  * Network Security Policies are not supported
+  * Analytics Profiles are not supported.
+  * Content Rewrite rules/Policies are not supported.
+  * Compression Policies are not supported.
 * Pools:
   * Pool Groups with differing server-side TLS are not supported.
 * Health Monitors:
@@ -119,8 +123,8 @@ $ python3 avi2bigip.py -l avi-config-unencrypted.json 2>&1 2>&1
 ###############
 ### SUMMARY ###
 ###############
-Found Avi Vip Count: 428
-Created F5 Vip Count: 449
+Found Avi Vip Count: 459
+Created F5 Vip Count: 458
 $ ll
 total 2.2M
 -rwxrwxrwx 1 mhermsdorfer mhermsdorfer  45K Mar 14 14:27  avi_bigip_for_merge.log

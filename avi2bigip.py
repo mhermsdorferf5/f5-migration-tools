@@ -204,32 +204,41 @@ def generateCertKeyFile(name, obj, type):
     if type == "key":
         f.write(obj.key)
 
-def addPoolToTenant(pool):
-    log_debug(f"Attempting Adding Pool: {pool.name} to tenant {pool.partition}")
-    poolTenantName = pool.partition
-    addedPoolToTenant = 0
+def addObjToTenant(obj):
+    objType = obj.__class__.__name__
+    tenantNameForAdd = obj.partition
+    log_debug(f"Attempting Adding Object: {obj.name} of type {objType} to tenant {tenantNameForAdd}")
+    addedToTenant = 0
     for tenant in avi_tenants:
         tenantName = f5_objects.f5_sanitize(tenant.name)
         if tenantName == "admin":
             tenantName = "Common"
-        if tenantName == poolTenantName:
-            log_debug(f"Adding Pool: FOUND TENANT {tenantName} for {pool.name} tenant contains {len(tenant.f5_pools)} pools.")
-            if len(tenant.f5_pools) > 0:
-                for f5_pool in tenant.f5_pools:
-                    log_debug(f"Adding Pool: {pool.name} testing against {f5_pool.name} before adding to tenant {poolTenantName}.")
-                    if f5_pool.name == pool.name:
-                        log_warning("Adding Pool: " + pool.name + " already exists in tenant: " + tenant.name)
-                        addedPoolToTenant = 1
-            if addedPoolToTenant == 0:
-                log_debug(f"Adding Pool: {pool.name} appending pool to {tenant.name}.")
-                tenant.f5_pools.append(pool)
-                addedPoolToTenant = 1
+        if tenantName == tenantNameForAdd:
+            match objType:
+                case "pool":
+                    addToList = tenant.f5_pools
+                case "monitor":
+                    addToList = tenant.f5_monitors
+                case "virtual":
+                    addToList = tenant.f5_virtuals
+                case _:
+                    log_error(f"Adding Object: {obj.name} not added to any tenant, no tenant found of type {objType} in tenant: {tenantNameForAdd}.")
+            log_debug(f"Adding Object: FOUND TENANT {tenantName} for {obj.name} tenant contains {len(addToList)} .")
+            for testObj in addToList:
+                log_debug(f"Adding Object: {obj.name} testing against {objType} before adding to tenant {tenantName}.")
+                if testObj.name == obj.name:
+                    log_debug(f"Adding Object: {obj.name} of type {objType} already exists in tenant: {tenantName}'s.")
+                    addedToTenant = 1
+            if addedToTenant == 0:
+                log_debug(f"Adding Object: {obj.name} appending to {objType} in tenant: {tenantName}.")
+                addToList.append(obj)
+                addedToTenant = 1
                 break
-    if addedPoolToTenant == 0:
-        log_error("Adding Pool: " + pool.name + " not added to any tenant, no tenant found for: " + pool.partition)
+    if addedToTenant == 0:
+        log_error(f"Adding Object: {obj.name} not added to any tenant, no tenant found of type {str(addToList)} in tenant: {tenantName}.")
         return 0
     return 1
-                    
+
 def createRedirectVirtual(f5_virtual, ip, rd):
     log_debug(f"Creating Redirect Virtual for {f5_virtual.name} to {ip}%{rd}")
     f5_redirect_virtual = copy.deepcopy(f5_virtual)
@@ -344,6 +353,10 @@ def avi2bigip_serverssl_profile(aviSSLProfile):
         f5_profile.ciphers = avi2bigip_cipherMapping(aviSSLProfile.accepted_ciphers)
     except Exception as e:
         log_error("avi2bigip_cipherMapping: " + aviSSLProfile.name + " not able to be converted cipher string " + str(e))
+        
+    if tenantName == "admin":
+        f5_profile.partition = "Common"
+    return f5_profile
 
 def avi2bigip_clientssl_profile(aviSSLProfile, aviSSLKeyAndCertificate):
 
@@ -483,6 +496,8 @@ def avi2bigip_monitor(monitor):
             raise Exception("Monitor: " + monitor.name + " Don't know how to handle monitor: " + monitor.type)
 
     f5_monitor = f5_objects.monitor(monitor.name, type)
+    if monitor.type == "HEALTH_MONITOR_EXTERNAL":
+        f5_monitor.name = f"{monitor.name}_FIXME_EXTERNAL_MONITOR_NOT_CONVERTED"
 
     if type == "dns":
         f5_monitor.qname = monitor.dns_monitor.query_name
@@ -541,7 +556,9 @@ def avi2bigip_poolGroup(poolGroup):
     f5_members = []
     vrfName = ""
     serverSideSSLProfileRef = ""
-    for subPool in poolGroup.members:
+    serviceDownAction = ""
+    monitorList = ""
+    for subPoolIndex, subPool in enumerate(poolGroup.members):
         if hasattr(subPool, 'priority_label'): 
             priority = subPool.priority_label
         else:
@@ -552,36 +569,70 @@ def avi2bigip_poolGroup(poolGroup):
             poolName =  f5_objects.f5_sanitize(pool.name)
             tenantName =  f5_objects.f5_sanitize(getRefName(pool.tenant_ref))
             routeDomainID = 0
-            for vrf in migration_config.routeDomainMapping:
-                if vrfName == vrf.vrfName:
-                    routeDomainID = vrf.rdID
+            
             if subPoolName == poolName and subPoolTenant == tenantName:
+                if hasattr(pool, 'use_service_port'): 
+                    if pool.use_service_port:
+                        log_warning("Pool: " + pool.name + " Don't know how to handle use_service_port: True")
+                if hasattr(pool, 'ssl_key_and_certificate_ref'): 
+                    log_error("Pool: " + pool.name + "Don't know how to handle ssl_key_and_certificate_ref for mTLS on server-side")
+                if hasattr(pool, 'fail_action'): 
+                    match pool.fail_action.type:
+                        case "FAIL_ACTION_CLOSE_CONN":
+                            serviceDownAction = "reset"
+                        case _:
+                            log_warning("Pool: " + pool.name + " Don't know how to handle fail_action: " + pool.fail_action.type)
+                
+                if hasattr(pool, 'health_monitor_refs'): 
+                    for monitor_ref in pool.health_monitor_refs:
+                        subPoolMonitorList = ""
+                        try:
+                            f5_monitor = avi2bigip_monitor(getObjByRef(monitor_ref))
+                        except Exception as e:
+                            log_error("Monitor: " + monitor.name + " not able to be converted to bigip object " + str(e))
+                            continue
+                        addObjToTenant(f5_monitor)
+                        monitorName = f"/{f5_monitor.partition}/{f5_monitor.name}"
+                        if subPoolMonitorList == "":
+                            subPoolMonitorList = monitorName
+                        else:
+                            if monitorName not in subPoolMonitorList:
+                                subPoolMonitorList = f"{subPoolMonitorList} and {monitorName}"
+                        if subPoolIndex == 0:
+                            monitorList = subPoolMonitorList
+                        else:
+                            if monitorName not in monitorList:
+                                log_error(f"Error Creating Pool Group: {poolGroupName}: subPool: {pool.name} contains different monitors than previous subPool")
+                    
                 if hasattr(pool, 'ssl_profile_ref'): 
                     if serverSideSSLProfileRef == "":
                         serverSideSSLProfileRef = pool.ssl_profile_ref
                         log_debug(f"Pool Group: {poolGroupName} Found SSL Profile: {serverSideSSLProfileRef} inside {pool.name}.")
                     elif serverSideSSLProfileRef != pool.ssl_profile_ref:
                         log_warning(f"Pool Group: {poolGroupName} Don't know how to handle multiple SSL Profiles in Pool Group, using: {serverSideSSLProfileRef} Found: {pool.ssl_profile_ref} inside {pool.name}.")
-                if poolName == subPoolName and tenantName == subPoolTenant:
-                    vrfName    =  getRefName(pool.vrf_ref)
-                    if hasattr(pool, 'servers'): 
-                        for member in pool.servers:
-                            if member.resolve_server_by_dns == True:
-                                member.ip.addr = member.hostname
-                            if hasattr(member, 'port'):
-                                f5_member = f5_objects.pool_member(member.ip.addr, member.port)
-                                f5_member.routeDomain = routeDomainID
-                                f5_member.partition = tenantName
-                            else:
-                                f5_member = f5_objects.pool_member(member.ip.addr, pool.default_server_port)
-                                f5_member.routeDomain = routeDomainID
-                                f5_member.partition = tenantName
-                            if member.ratio != 1:
-                                f5_member.ratio = member.ratio
-                            if member.enabled != "true":
-                                f5_member.enabled = "no"
-                            member.priority = priority
-                            f5_members.append(f5_member)
+                        
+                vrfName    =  getRefName(pool.vrf_ref)
+                for vrf in migration_config.routeDomainMapping:
+                    if vrfName == vrf.vrfName:
+                        routeDomainID = vrf.rdID
+                if hasattr(pool, 'servers'): 
+                    for member in pool.servers:
+                        if member.resolve_server_by_dns == True:
+                            member.ip.addr = member.hostname
+                        if hasattr(member, 'port'):
+                            f5_member = f5_objects.pool_member(member.ip.addr, member.port)
+                            f5_member.routeDomain = routeDomainID
+                            f5_member.partition = tenantName
+                        else:
+                            f5_member = f5_objects.pool_member(member.ip.addr, pool.default_server_port)
+                            f5_member.routeDomain = routeDomainID
+                            f5_member.partition = tenantName
+                        if member.ratio != 1:
+                            f5_member.ratio = member.ratio
+                        if member.enabled != "true":
+                            f5_member.enabled = "no"
+                        member.priority = priority
+                        f5_members.append(f5_member)
 
     if tenantName == "admin":
         tenantName = "Common"
@@ -590,6 +641,7 @@ def avi2bigip_poolGroup(poolGroup):
     f5_pool.partition = poolGroupTenantName
     f5_pool.routeDomain = vrfName
     f5_pool.minActiveMembers = poolGroup.min_servers
+    f5_pool.monitors = monitorList
     
     return f5_pool, serverSideSSLProfileRef
 
@@ -643,26 +695,19 @@ def avi2bigip_pool(pool):
                 f5_pool.serviceDownAction = "reset"
             case _:
                 log_warning("Pool: " + pool.name + " Don't know how to handle fail_action: " + pool.fail_action.type)
-
+    
     if hasattr(pool, 'health_monitor_refs'): 
-        if len(pool.health_monitor_refs) > 1:
-            for index, monitor_ref in enumerate(pool.health_monitor_refs):
-                monitorName =  f5_objects.f5_sanitize(getRefName(monitor_ref))
-                monitorTenantName = f5_objects.f5_sanitize(getRefTenant(monitor_ref))
-                monitorPartition =  "Common"
-                if monitorTenantName != "admin":
-                    monitorPartition = monitorTenantName
-                if index == 0:
-                    f5_pool.monitors = f"/{monitorPartition}/{monitorName}"
-                else:
-                    f5_pool.monitors = f5_pool.monitors + " and " + f"/{monitorPartition}/{monitorName}"
-        else:
-            monitorName =  f5_objects.f5_sanitize(getRefName(pool.health_monitor_refs[0]))
-            monitorTenantName =  f5_objects.f5_sanitize(getRefTenant(pool.health_monitor_refs[0]))
-            monitorPartition =  "Common"
-            if monitorTenantName != "admin":
-                monitorPartition = monitorTenantName
-            f5_pool.monitors = f"/{monitorPartition}/{monitorName}"
+        for index, monitor_ref in enumerate(pool.health_monitor_refs):
+            try:
+                f5_monitor = avi2bigip_monitor(getObjByRef(monitor_ref))
+            except Exception as e:
+                log_error("Monitor: " + monitor.name + " not able to be converted to bigip object " + str(e))
+                continue
+            addObjToTenant(f5_monitor)
+            if index == 0:
+                f5_pool.monitors = f"/{f5_monitor.partition}/{f5_monitor.name}"
+            else:
+                f5_pool.monitors = f5_pool.monitors + " and " + f"/{f5_monitor.partition}/{f5_monitor.name}"
 
     match pool.lb_algorithm:
         case "LB_ALGORITHM_ROUND_ROBIN":
@@ -687,15 +732,32 @@ def avi2bigip_pool(pool):
 
 def avi2bigip_virtual(virtual):
 
+    tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
     # List of F5 virtuals, this allows us to handle splitting
     virtuals = []
     redirectVipFound = 0
+    sniParent = False
 
-    if virtual.type != "VS_TYPE_NORMAL":
-        log_error("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
-        raise Exception("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
 
-    tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
+    match virtual.type:
+        case "VS_TYPE_NORMAL":
+            sniParent = False
+        case "VS_TYPE_VH_PARENT":
+            # If we have a parent vip, go find all the children vips and put them into a list.
+            sniParent = True
+            parentUUID = virtual.uuid
+            childrenUUIDs = virtual.extension.vh_child_vs_uuid
+            childrenVirtuals = []
+            for testVirtual in avi_config.VirtualService:
+                if testVirtual.uuid in childrenUUIDs:
+                    childrenVirtuals.append(testVirtual)
+        case "VS_TYPE_VH_CHILD":
+            #log_warning(f"Virtual: {virtual.name} is type: {virtual.type} skipping, as this is processed as part of it's Parent Virtual Service." )
+            raise TypeError(f"Virtual: {virtual.name} is type: {virtual.type} skipping, as this is processed as part of it's Parent Virtual Service." )
+        case _:
+            log_error("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
+            raise Exception("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
+
 
     if not hasattr(virtual, 'services'):
         #log_warning("Virtual: " + virtual.name + " Don't know how to handle no services on VirtualService object." )
@@ -715,7 +777,6 @@ def avi2bigip_virtual(virtual):
 
     destPortList = []
     destIpList = []
-    destinationList = []
     for service in virtual.services:
         destPortList.append(service.port)
 
@@ -755,7 +816,7 @@ def avi2bigip_virtual(virtual):
                 log_error("Pool: " + virtual.pool_ref + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
             else:
                 log_error("Pool: " + virtual.pool_ref + " not able to be converted to bigip object " + str(e))
-        addedPoolToTenant = addPoolToTenant(f5_pool)
+        addObjToTenant(f5_pool)
         # Add Pool to Virtual Config:
         default_pool =  f"/{f5_pool.partition}/{f5_pool.name}"
         
@@ -767,7 +828,7 @@ def avi2bigip_virtual(virtual):
                 log_error("Pool: " + virtual.pool_group_ref + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
             else:
                 log_error("Pool: " + virtual.pool_group_ref + " not able to be converted to bigip object " + str(e))
-        addedPoolToTenant = addPoolToTenant(f5_pool)
+        addObjToTenant(f5_pool)
         # Add Pool to Virtual Config:
         default_pool =  f"/{f5_pool.partition}/{f5_pool.name}"
 
@@ -857,13 +918,13 @@ def avi2bigip_virtual(virtual):
                     foundPolicyRules += 1
                     log_debug(f"Virtual: {virtual.name} has httpPolicySet with http_request_policy rule: {rule}" )
         if foundPolicyRules == 0:
-            log_warning("Virtual: " + virtual.name + " has http_policies but policy has no rules, ignoring." )
+            log_debug("Virtual: " + virtual.name + " has http_policies but policy has no rules, ignoring." )
         else:
             log_error("Virtual: " + virtual.name + " Don't know how to handle http_policies with http policy rules on VirtualService object." )
     
 
     # Now Client SSL Profile, if it has one.
-    if hasattr(virtual, 'ssl_profile_ref'):
+    if hasattr(virtual, 'ssl_profile_ref') and not sniParent:
         if len(virtual.ssl_key_and_certificate_refs) > 1:
             log_warning("Virtual: " + virtual.name + " Don't know how to handle multiple ssl_key_and_certificate_refs." )
         try:
@@ -881,15 +942,60 @@ def avi2bigip_virtual(virtual):
     if serverSideSSLProfileRef != "":
         log_debug(f"Virtual: {virtual.name} has serverSideSSLProfileRef: {serverSideSSLProfileRef}")
         try:
-            f5_serverssl_profile = avi2bigip_clientssl_profile(getObjByRef(serverSideSSLProfileRef))
+            f5_serverssl_profile = avi2bigip_serverssl_profile(getObjByRef(serverSideSSLProfileRef))
         except Exception as e:
             if args.debug:
                 log_error("ERROR: serverssl profile: " + serverSideSSLProfileRef + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
             else:
                 log_error("ERROR: serverssl profile: " + serverSideSSLProfileRef + " not able to be converted to bigip object " + str(e))
-    
+        
         f5_virtual.profilesServerSide.append(f"/{f5_serverssl_profile.partition}/{f5_serverssl_profile.name}")
         profiles.append(f5_serverssl_profile)
+    
+    # Now Handle SNI Parent Virtual and all children virtuals, SSL Profiles, and Content Switching
+    if sniParent:
+        log_debug(f"Virtual: {virtual.name} is a SNI Parent Virtual, building Child SSL profiles and content switching.")
+        try:
+            f5_clientssl_parent_profile = avi2bigip_clientssl_profile(getObjByRef(virtual.ssl_profile_ref), getObjByRef(virtual.ssl_key_and_certificate_refs[0]))
+        except Exception as e:
+            if args.debug:
+                log_error("ERROR: clientssl profile: " + virtual.ssl_profile_ref + " " + virtual.ssl_key_and_certificate_refs[0] + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
+            else:
+                log_error("ERROR: clientssl profile: " + virtual.ssl_profile_ref + " " + virtual.ssl_key_and_certificate_refs[0] + " not able to be converted to bigip object " + str(e))
+        # Do not append the parent profile to the Virtual Server, as it's just a parent for the child profiles, but do append it to the profiles list.
+        parentClientSSLProfileName = f"/{f5_clientssl_parent_profile.partition}/{f5_clientssl_parent_profile.name}"
+        profiles.append(f5_clientssl_parent_profile)
+        defaultClientSSLProfile = f5_objects.ClientSSLProfile( f"{virtual.name}_sni_default_clientssl" )
+        defaultClientSSLProfile.parent = parentClientSSLProfileName
+        # empty out ciphers, and options, these get picked up from the parent profile.
+        defaultClientSSLProfile.options = []
+        defaultClientSSLProfile.ciphers = []
+        defaultClientSSLProfile.sniDefault = True
+        profiles.append(defaultClientSSLProfile)
+        f5_virtual.profilesClientSide.append(f"/{defaultClientSSLProfile.partition}/{defaultClientSSLProfile.name}")
+        # Now we need to create a default SNI ClientSSL profiel that does get appended to the Virtual.
+        for childVirtual in childrenVirtuals:
+            try:
+                f5_clientssl_child_profile = avi2bigip_clientssl_profile(getObjByRef(childVirtual.ssl_profile_ref), getObjByRef(childVirtual.ssl_key_and_certificate_refs[0]))
+            except Exception as e:
+                if args.debug:
+                    log_error("ERROR: clientssl profile: " + childVirtual.ssl_profile_ref + " " + childVirtual.ssl_key_and_certificate_refs[0] + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
+                else:
+                    log_error("ERROR: clientssl profile: " + childVirtual.ssl_profile_ref + " " + childVirtual.ssl_key_and_certificate_refs[0] + " not able to be converted to bigip object " + str(e))
+            f5_clientssl_child_profile.parent = parentClientSSLProfileName
+            f5_clientssl_child_profile.sniDefault = False
+            f5_clientssl_child_profile.sniRequired = True
+            profiles.append(f5_clientssl_child_profile)
+            if f"/{f5_clientssl_child_profile.partition}/{f5_clientssl_child_profile.name}" not in f5_virtual.profilesClientSide:
+                f5_virtual.profilesClientSide.append(f"/{f5_clientssl_child_profile.partition}/{f5_clientssl_child_profile.name}")
+            # Add to our VIP handled counter:
+            global f5VipCount
+            f5VipCount += 1
+           
+            # FIXME FIXME FIX ME 
+            # Now we need to create LTM Policies to route traffic to the correct pool, etc. 
+            log_error(f"Virtual: {virtual.name} Don't know fully know how to handle type: {virtual.type} Creating VIP but NO LTM POLICIES" )
+    
 
     # If we have multiple destinations and/or multiple ports, copy our vip to multiple virtuals one per destination port combo.
     for ip in destIpList:
@@ -1080,7 +1186,10 @@ def main() -> int:
                 datefmt='%Y-%m-%d %H:%M:%S'
             )
 
+    global aviVipCount
     aviVipCount = 0
+    
+    global f5VipCount
     f5VipCount = 0
 
     global avi_tenants
@@ -1120,31 +1229,6 @@ def main() -> int:
                     f5_routeDomain.description = vrf.description
                 f5_routeDomains.append(f5_routeDomain)
     
-    for monitor in avi_config.HealthMonitor:
-        tenantName =  f5_objects.f5_sanitize(getRefName(monitor.tenant_ref))
-        if args.aviTenant != "all" and tenantName != args.aviTenant:
-            continue
-        if tenantName == "admin":
-            tenantName = "Common"
-    
-        try:
-            f5_monitor = avi2bigip_monitor(monitor)
-        except Exception as e:
-            log_error("Monitor: " + monitor.name + " not able to be converted to bigip object " + str(e))
-            continue
-    
-        addedToTenant = 0
-        for tenant in avi_tenants:
-            if tenant.name == tenantName:
-                tenant.f5_monitors.append(f5_monitor)
-                addedToTenant = 1
-        if addedToTenant == 0:
-            log_error("Monitor: " + monitor.name + " not added to any tenant, no tenant found for: " + tenant.name)
-            addedToTenant = 0
-        
-        #cleanup vars:
-        del addedToTenant, f5_monitor, tenantName
-    
     for virtual in avi_config.VirtualService:
         tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
         if tenantName == "admin":
@@ -1157,6 +1241,9 @@ def main() -> int:
         aviVipCount += 1
         try:
             virtuals, profiles = avi2bigip_virtual(virtual)
+        except TypeError as e:
+            log_debug("virtual: " + virtual.name + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
+            continue
         except Exception as e:
             if args.debug:
                 log_error("virtual: " + virtual.name + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))

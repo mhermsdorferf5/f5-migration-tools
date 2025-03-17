@@ -167,6 +167,7 @@ class ClientSSLProfile:
     def __init__(self, name):
         self.name = f5_sanitize(name)
         self.type = "client-ssl"
+        self.parent = "clientssl"
         self.partition = "Common"
         self.options = [ "dont-insert-empty-fragments", "no-ssl", "no-dtls", "no-tlsv1.3", "no-tlsv1"]
         self.ciphers = [ "DEFAULT" ]
@@ -178,6 +179,8 @@ class ClientSSLProfile:
         self.chainFile = ""
         self.caFileName = ""
         self.caFile = ""
+        self.sniDefault = False
+        self.sniRequire = False
 
     @property
     def name(self):
@@ -191,9 +194,13 @@ class ClientSSLProfile:
     def __repr__(self):
         return f"bigip_clientssl(name={self.name}"
     def tmos_obj(self):
-        optionsStr = ""
-        for option in self.options:
-            optionsStr += f"{option} "
+        if len(self.options) > 0:
+            optionsStr = "\n options { "
+            for option in self.options:
+                optionsStr += f"{option} "
+            optionsStr += " }"
+        else:
+            optionsStr = ""
         certKeyChainName = re.sub('.crt', '', self.certFileName)
         if self.chainFileName == "none":
             chainObjName = "none"
@@ -207,23 +214,32 @@ class ClientSSLProfile:
             keyObjName = "/Common/default.key"
         else:
             keyObjName = f"/{self.partition}/{self.keyFileName}"
-        cipherString = ""
-        for i in range(len(self.ciphers)):
-            if i == 0:
-                cipherString += f"{self.ciphers[i]}"
-            else:
-                cipherString += f":{self.ciphers[i]}"
+        if len(self.ciphers) > 0:
+            cipherString = "\nciphers "
+            for i in range(len(self.ciphers)):
+                if i == 0:
+                    cipherString += f"{self.ciphers[i]}"
+                else:
+                    cipherString += f":{self.ciphers[i]}"
+        else:
+            cipherString = ""
+        if self.sniDefault:
+            sniDefaultStr = "\nsni-default true"
+        else:
+            sniDefaultStr = ""
+        if self.sniRequire:
+            sniRequireStr = "\nsni-require true"
+        else:
+            sniRequireStr = ""
         return f"""ltm profile client-ssl /{self.partition}/{self.name} {{
-    defaults-from clientssl
+    defaults-from {self.parent}
     cert-key-chain {{
         {certKeyChainName} {{
             cert {certObjName}
             key {keyObjName}
             chain {chainObjName}
         }}
-    }}
-    ciphers {cipherString}
-    options {{ {optionsStr} }}
+    }}{cipherString}{optionsStr}{sniDefaultStr}{sniRequireStr}
 }}"""
 
 class networkProfile:
