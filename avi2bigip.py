@@ -74,6 +74,7 @@ class avi_tenant:
         self.f5_virtuals = []
         self.f5_apps = []
         self.f5_profiles = []
+        self.f5_policies = []
     def __repr__(self):
         virtualString= "[ "
         for virtual in self.f5_virtuals:
@@ -221,6 +222,10 @@ def addObjToTenant(obj):
                     addToList = tenant.f5_monitors
                 case "virtual":
                     addToList = tenant.f5_virtuals
+                case "ltmPolicy":
+                    addToList = tenant.f5_policies
+                case "iRule":
+                    addToList = tenant.f5_rules
                 case _:
                     log_error(f"Adding Object: {obj.name} not added to any tenant, no tenant found of type {objType} in tenant: {tenantNameForAdd}.")
             log_debug(f"Adding Object: FOUND TENANT {tenantName} for {obj.name} tenant contains {len(addToList)} .")
@@ -251,6 +256,34 @@ def createRedirectVirtual(f5_virtual, ip, rd):
     f5_redirect_virtual.profilesAll.append(f"/Common/f5-tcp-progressive")
     f5_redirect_virtual.profilesAll.append(f"/Common/http")
     return f5_redirect_virtual
+
+def createSNIRoutingLTMPolicy(name, partition, sniMapping):
+    ltmPolicy = f5_objects.ltmPolicy(name)
+    ltmPolicy.partition = partition
+    ltmPolicy.controls = ['forwarding']
+    ltmPolicy.requires = ['http', 'client-ssl']
+    rules = dict()
+    for i, (key, value) in enumerate(sniMapping.items()):
+        ruleName = f"{key}_sni_rule"
+        rules[ruleName] = f"""            conditions {{
+                0 {{
+                    ssl-extension
+                    ssl-client-hello
+                    server-name
+                    values {{ {key} }}
+                }}
+            }}
+            actions {{
+                0 {{
+                    forward
+                    select
+                    pool {value}
+                }}
+            }}
+            ordinal {i}
+"""
+    ltmPolicy.rules = rules
+    return ltmPolicy
 
 def avi2bigip_http_profile(aviApplicationProfile):
 
@@ -401,9 +434,9 @@ def avi2bigip_clientssl_profile(aviSSLProfile, aviSSLKeyAndCertificate):
         log_error("avi2bigip_cipherMapping: " + aviSSLProfile.name + " not able to be converted cipher string " + str(e))
 
     cert = aviSSLKeyAndCertificate.certificate.certificate
-    log_debug(f"Cert: {cert}")
+    #log_debug(f"Cert: {cert}")
     key = aviSSLKeyAndCertificate.key
-    log_debug(f"Key: {key}")
+    #log_debug(f"Key: {key}")
 
     f5_profile.certFileName = f"{f5_profile.name}.crt"
     f5_profile.certFile = cert
@@ -735,8 +768,13 @@ def avi2bigip_virtual(virtual):
     tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
     # List of F5 virtuals, this allows us to handle splitting
     virtuals = []
+    profiles = []
+    policies = []
+    rules = []
+
     redirectVipFound = 0
     sniParent = False
+    sniChild = False
 
 
     match virtual.type:
@@ -752,53 +790,58 @@ def avi2bigip_virtual(virtual):
                 if testVirtual.uuid in childrenUUIDs:
                     childrenVirtuals.append(testVirtual)
         case "VS_TYPE_VH_CHILD":
-            #log_warning(f"Virtual: {virtual.name} is type: {virtual.type} skipping, as this is processed as part of it's Parent Virtual Service." )
-            raise TypeError(f"Virtual: {virtual.name} is type: {virtual.type} skipping, as this is processed as part of it's Parent Virtual Service." )
+            sniChild = True
         case _:
             log_error("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
             raise Exception("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
 
 
-    if not hasattr(virtual, 'services'):
-        #log_warning("Virtual: " + virtual.name + " Don't know how to handle no services on VirtualService object." )
-        raise Exception("Virtual: " + virtual.name + " Don't know how to handle no services on VirtualService object." )
-    if virtual.services[0].port != virtual.services[0].port_range_end:
-        log_error("Virtual: " + virtual.name + " Don't know how to handle port range." )
-    if virtual.services[0].enable_http2 == "true":
-        log_warning("Virtual: " + virtual.name + " Don't know how to handle http/2." )
-    if virtual.services[0].is_active_ftp_data_port == "true":
-        log_warning("Virtual: " + virtual.name + " Don't know how to handle is_active_ftp_data_port." )
-    if virtual.services[0].horizon_internal_ports == "true":
-        log_warning("Virtual: " + virtual.name + " Don't know how to handle horizon_internal_ports." )
-    if virtual.use_bridge_ip_as_vip == "true":
-        log_warning("Virtual: " + virtual.name + " Don't know how to handle use_bridge_ip_as_vip." )
-    if virtual.use_vip_as_snat == "true":
-        log_warning("Virtual: " + virtual.name + " Don't know how to handle use_vip_as_snat." )
-
     destPortList = []
     destIpList = []
-    for service in virtual.services:
-        destPortList.append(service.port)
-
-    vsVip = getObjByRef(virtual.vsvip_ref)
-    vrfName =  getRefName(vsVip.vrf_context_ref)
-    for vip in vsVip.vip:
-        ip = vip.ip_address.addr
-        mask = vip.prefix_length 
-        routeDomainID = 0
-        if mask != 32:
-            log_warning(f"VsVip: {virtual.vsvip_ref} Don't know how to handle VIP with non /32 bit mask." )
-        for vrf in migration_config.routeDomainMapping:
-            if vrfName == vrf.vrfName:
-                routeDomainID = vrf.rdID
-        # if RD is zero let it pickup default route domain from the partition.
-        if routeDomainID == 0:
-            destIpList.append(f"{ip}")
-        else:
-            destIpList.append(f"{ip}%{routeDomainID}")
-        
-    # Temp Destination, will get modified if needed for multiple ip & port handling:
-    destination = f"{destIpList[0]}:{str(destPortList[0])}"
+    if not hasattr(virtual, 'services') and not sniChild:
+        #log_warning("Virtual: " + virtual.name + " Don't know how to handle no services on VirtualService object." )
+        raise Exception("Virtual: " + virtual.name + " Don't know how to handle no services on VirtualService object." )
+    if hasattr(virtual, 'services'):
+        if virtual.services[0].port != virtual.services[0].port_range_end:
+            log_error("Virtual: " + virtual.name + " Don't know how to handle port range." )
+        if virtual.services[0].enable_http2 == "true":
+            log_warning("Virtual: " + virtual.name + " Don't know how to handle http/2." )
+        if virtual.services[0].is_active_ftp_data_port == "true":
+            log_warning("Virtual: " + virtual.name + " Don't know how to handle is_active_ftp_data_port." )
+        if virtual.services[0].horizon_internal_ports == "true":
+            log_warning("Virtual: " + virtual.name + " Don't know how to handle horizon_internal_ports." )
+        if virtual.use_bridge_ip_as_vip == "true":
+            log_warning("Virtual: " + virtual.name + " Don't know how to handle use_bridge_ip_as_vip." )
+        if virtual.use_vip_as_snat == "true":
+            log_warning("Virtual: " + virtual.name + " Don't know how to handle use_vip_as_snat." )
+    
+        for service in virtual.services:
+            destPortList.append(service.port)
+    
+        vsVip = getObjByRef(virtual.vsvip_ref)
+        vrfName =  getRefName(vsVip.vrf_context_ref)
+        for vip in vsVip.vip:
+            ip = vip.ip_address.addr
+            mask = vip.prefix_length 
+            routeDomainID = 0
+            if mask != 32:
+                log_warning(f"VsVip: {virtual.vsvip_ref} Don't know how to handle VIP with non /32 bit mask." )
+            for vrf in migration_config.routeDomainMapping:
+                if vrfName == vrf.vrfName:
+                    routeDomainID = vrf.rdID
+            # if RD is zero let it pickup default route domain from the partition.
+            if routeDomainID == 0:
+                destIpList.append(f"{ip}")
+            else:
+                destIpList.append(f"{ip}%{routeDomainID}")
+            
+        # Temp Destination, will get modified if needed for multiple ip & port handling:
+        destination = f"{destIpList[0]}:{str(destPortList[0])}"
+    if sniChild:
+        destination = f"255.255.255.255%0:123"
+        destIpList.append("255.255.255.255%0")
+        destPortList.append(123)
+        vrfName = 0
 
 
     # Use this to handle ServerSSL Config, based on Avi Pool
@@ -836,8 +879,6 @@ def avi2bigip_virtual(virtual):
     f5_virtual.routeDomain = vrfName
     if tenantName != "admin":
         f5_virtual.partition = tenantName
-
-    profiles = []
 
     # Network Profile first...
     try:
@@ -991,42 +1032,30 @@ def avi2bigip_virtual(virtual):
             profiles.append(f5_clientssl_child_profile)
             if f"/{f5_clientssl_child_profile.partition}/{f5_clientssl_child_profile.name}" not in f5_virtual.profilesClientSide:
                 f5_virtual.profilesClientSide.append(f"/{f5_clientssl_child_profile.partition}/{f5_clientssl_child_profile.name}")
-            # Add to our VIP handled counter:
-            global f5VipCount
-            f5VipCount += 1
-            if hasattr(childVirtual, 'http_policies'):
-                foundPolicyRules = 0
-                for httpPolicy in childVirtual.http_policies:
-                    try:
-                        httpPolicy = getObjByRef(httpPolicy.http_policy_set_ref)
-                    except Exception as e:
-                        if args.debug:
-                            log_error("HTTP Policy: Can't find policy: " + httpPolicy.http_policy_set_ref + str(e) + " full stack: " + str(traceback.format_exc()))
-                        else:
-                            log_error("HTTP Policy: Can't find policy: " + httpPolicy.http_policy_set_ref + str(e))
-                    if hasattr(httpPolicy, 'http_request_policy'):
-                        for rule in httpPolicy.http_request_policy.rules:
-                            foundPolicyRules += 1
-                            log_debug(f"Virtual: {childVirtual.name} has httpPolicySet with http_request_policy rule: {rule}" )
-                    if hasattr(httpPolicy, 'http_response_policy'):
-                        for rule in httpPolicy.http_response_policy.rules:
-                            foundPolicyRules += 1
-                            log_debug(f"Virtual: {childVirtual.name} has httpPolicySet with http_request_policy rule: {rule}" )
-                if foundPolicyRules == 0:
-                    log_debug("Virtual: " + childVirtual.name + " has http_policies but policy has no rules, ignoring." )
-                else:
-                    log_error("Virtual: " + childVirtual.name + " Don't know how to handle http_policies with http policy rules on VirtualService object." )
+                
+            try:
+                f5_child_virtuals, f5_child_profiles = avi2bigip_virtual(childVirtual)
+            except TypeError as e:
+                log_warning("virtual: subvirtual" + virtual.name + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
+                continue
+            
+            if len(f5_child_virtuals) == 0:
+                log_error(f"virtual: subvirtual {childVirtual.name} returned no virtuals, don't know how to handle this.")
+            if len(f5_child_virtuals) > 1:
+                log_warning(f"virtual: subvirtual {childVirtual.name} returned {len(f5_child_virtuals)} virtuals, don't know how to handle this.")
            
-            # FIXME FIXME FIX ME 
-            # Now we need to create LTM Policies to route traffic to the correct pool, etc. 
             # First we need to add this and any other virtual host domains to a SNI Mapping of hostname => pool_ref
             for hostname in childVirtual.vh_domain_name:
-                sniPoolMap["hostname"] = childVirtual.pool_ref
-        
+                sniPoolMap[hostname] = f5_child_virtuals[0].default_pool
+                # Add to our VIP handled counter:
+                global f5VipCount
+                f5VipCount += 1
+
+            
         # Create LTM Policy to reference Pools in Pool List... plus make sure those pools get added to the config
-        
-        log_error(f"Virtual: {virtual.name} Don't know fully know how to handle type: {virtual.type} Creating VIP but NO LTM POLICIES" )
-    
+        ltmPolicyName = f"{f5_virtual.name}__ltm_policy"
+        ltmPolicy = createSNIRoutingLTMPolicy(ltmPolicyName, f5_virtual.partition, sniPoolMap)
+        addObjToTenant(ltmPolicy)
 
     # If we have multiple destinations and/or multiple ports, copy our vip to multiple virtuals one per destination port combo.
     for ip in destIpList:
@@ -1052,7 +1081,7 @@ def avi2bigip_virtual(virtual):
                 newDestVirtual.destination = f"{ip}%{rd}:{port}"
                 virtuals.append(newDestVirtual)
             else:
-                log_debug(f"VsVip: {virtual.vsvip_ref} SINGLE DESTINATION SINGLE PORT building VIP for: {ip}:{port}" )
+                log_debug(f"VsVip: {virtual.name} SINGLE DESTINATION SINGLE PORT building VIP for: {ip}:{port}" )
                 virtuals.append(f5_virtual)
         if createRedirectVips:
             # Check to see if we already have a VIP on port 80 first..
@@ -1110,6 +1139,9 @@ def writeBigIpConfig():
         f.write(f"### Tenant: {tenant.name}\tProfiles ###\n")
         for profile in tenant.f5_profiles:
             f.write(profile.tmos_obj() + "\n")
+        f.write(f"### Tenant: {tenant.name}\tLTM Policies###\n")
+        for policy in tenant.f5_policies:
+            f.write(policy.tmos_obj() + "\n")
         f.write(f"### Tenant: {tenant.name}\tVirtual Servers ###\n")
         for virtual in tenant.f5_virtuals:
             f.write(virtual.tmos_obj() + "\n")
@@ -1285,6 +1317,9 @@ def main() -> int:
         for tenant in avi_tenants:
             if tenant.name == tenantName:
                 for f5_virtual in virtuals:
+                    # Skip if it's a child virtual with dummy address:
+                    if "255.255.255.255%0" in f5_virtual.destination:
+                        continue
                     f5VipCount += 1
                     tenant.f5_virtuals.append(f5_virtual)
                     addedToTenant += 1

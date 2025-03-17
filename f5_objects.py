@@ -67,6 +67,8 @@ class ltmPolicy(bigip_obj):
         self.name = f5_sanitize(name)
         self.controls = [ "none" ]
         self.requires = [ "none" ]
+        self.strategy = "first-match"
+        self.status = "published"
         self.rules = dict()
 
     @property
@@ -83,6 +85,7 @@ class ltmPolicy(bigip_obj):
     def controls(self, value):
         _valid_controls = [ "none", "forwarding", "caching", "compression", "acceleration", "asm", "avr", "l7dos", "classification", "request-adaptation", "response-adaptation", "server-ssl", "websocket" ]
         if isinstance(value, list):
+            self._controls = [ "none" ]
             valid = True
             for i in value:
                 if i not in _valid_controls:
@@ -99,6 +102,7 @@ class ltmPolicy(bigip_obj):
     def requires(self, value):
         _valid_requires = [ "none", "http", "tcp", "client-ssl", "ssl-persist", "classification" ]
         if isinstance(value, list):
+            self._requires = [ "none" ]
             valid = True
             for i in value:
                 if i not in _valid_requires:
@@ -108,51 +112,30 @@ class ltmPolicy(bigip_obj):
         else:
             self._requires = [ "none" ]
 
-    @property
-    def loadBalancingMode(self):
-        return self._loadBalancingMode
-    @loadBalancingMode.setter
-    def loadBalancingMode(self, value):
-        _valid_modes = ["dynamic-ratio-member", "dynamic-ratio-node", "fastest-app-response", "fastest-node", "least-connections-member", "least-connections-node", "least-sessions", "observed-member", "observed-node", "predictive-member", "predictive-node", "ratio-least-connections-member", "ratio-least-connections-node", "ratio-member", "ratio-node", "ratio-session", "round-robin", "weighted-least-connections-member", "weighted-least-connections-node"]
-        if value in _valid_modes:
-            self._loadBalancingMode = value
-        else:
-            self._loadBalancingMode= "round-robin"
-
     def __str__(self):
-        memberString = "[ "
-        for member in self.members:
-            memberString += f"\n\t\t\t{member}"
-        memberString += "]"
-        return f"bigip_pool(name={self.name}, \n\t\tmembers={memberString}"
+        return f"bigip_ltm_policy(name={self.name})"
     def __repr__(self):
-        memberString = "[ "
-        for member in self.members:
-            memberString += f"\n\t\t\t{member}"
-        memberString += "]"
-        return f"bigip_pool(name={self.name}, \n\t\tmembers={memberString}"
+        return f"bigip_ltm_policy(name={self.name})"
 
     def tmos_obj(self):
-        members_objs = "\n"
-        for member in self.members:
-            members_objs += f"{member.tmos_obj()}\n"
-        if len(self.members) == 0:
-            return f"""ltm pool /{self.partition}/{self.name} {{
-    allow-snat {self.allowSNAT}
-    allow-nat {self.allowNAT}
-    load-balancing-mode {self.loadBalancingMode}
-    service-down-action {self.serviceDownAction}
-    monitor {self.monitors}
-    min-active-members {self.minActiveMembers}
-}}"""
-        return f"""ltm pool /{self.partition}/{self.name} {{
-    allow-snat {self.allowSNAT}
-    allow-nat {self.allowNAT}
-    load-balancing-mode {self.loadBalancingMode}
-    service-down-action {self.serviceDownAction}
-    members {{ {members_objs}    }}
-    monitor {self.monitors}
-    min-active-members {self.minActiveMembers}
+        controlsStr = "{ "
+        for control in self.controls:
+            controlsStr += f"{control} "
+        controlsStr += "}"
+        requiresStr = "{ "
+        for requires in self.requires:
+            requiresStr += f"{requires} "
+        requiresStr += "}"
+        rulesStr = "{"
+        for i, (key, value) in enumerate(self.rules.items()):
+            rulesStr += f"\n\t\t{key} {{ \n{value}\t\t}}"
+        rulesStr += "\n\t}"
+        return f"""ltm policy /{self.partition}/{self.name} {{
+    controls {controlsStr}
+    requires {requiresStr}
+    rules {rulesStr}
+    status {self.status}
+    strategy {self.strategy}
 }}"""
 
 class httpProfile(bigip_obj):

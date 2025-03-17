@@ -2,6 +2,16 @@
 
 This repo is intended to contain migraiton scripts for various system to BIG-IP.  Currently the only tool is to convert Avi to BIG-IP.
 
+# Tools
+
+## json-breakdown.sh
+
+This will take in a large json file and break it down into smaller files based on the top level 'list' of objects.  Particularly useful for Avi Configs.
+
+## create-dummy-crypto.py
+
+This will read in all of the files ending with .crt or .key in a directory, and then re-generate the keys and certs with the same filename & x509 subject but with freshly generated dummy key material.  Note that of course these are now self-signed certs.  While we do copy the subject over, other extensions such as SNI are ignored.
+
 ## Avi Migration
 
 This was built with configruation exported from a version 22.1.6 controller.  Note that you do need to export the Avi config with un-encrypted TLS keys, this can only be done via CLI on the Avi Controller.
@@ -9,20 +19,35 @@ This was built with configruation exported from a version 22.1.6 controller.  No
 ### Exceptions
 
 * Virtual Services:
-  * Only VS_TYPE_NORMAL is currently supported
-  * HTTP Policies are not supported (no content switching)
+  * VS_TYPE_NORMAL is currently supported
+  * VS_TYPE_PARENT & VS_TYPE_CHILD is supported for SNI parent/child handling only.
   * Only HTTP and L4 type VIPs currently supported.
   * Network Security Policies are not supported
   * Analytics Profiles are not supported.
+  * HTTP Policies are not supported (no content switching)
+* HTTP Profiles:
   * Content Rewrite rules/Policies are not supported.
   * Compression Policies are not supported.
+  * xff_update: not fully supported, F5 by default always appends a new XFF header to the request.
+    * If XFF replacement is required, we'll need an LTM Policy or iRule to get that functionality.
+  * xff_alternate_name: not fully supported, F5's HTTP Profiles only handle inserting xff headers with the industry standard name: X-Forwarded-For.
+    * If custom XFF header names are required, that can be done via iRule or LTM Policies.
+  * Client mTLS isn't currently supported.
 * Pools:
   * Pool Groups with differing server-side TLS are not supported.
+  * Server mTLS isn't currently supported.
+  * Don't handle append_port property, this script doesn't generate configuration that will append ports to the host header ever.
+    * If host header rewriting is required, that can be done via iRule, LTM Policies, or Rewrite Profiles.
 * Health Monitors:
   * HEALTH_MONITOR_EXTERNAL is not supported
   * HEALTH_MONITOR_SCTP is not supported
 * No support for Avi WAF Engine.
 * No support for Avi DNS.
+
+### Traffic Handling Differences
+
+* X Forwarding For Headers:
+  * F5 Doesn't natively support the concept of 
 
 ### Program Options
 
