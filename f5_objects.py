@@ -59,8 +59,103 @@ class bigip_obj:
 
     def __repr__(self):
         return f"bigip_obj(name='{self.name}', description='{self.description}')"
+    
+class ltmPolicy(bigip_obj):
+    description = "LTM Policy"
 
-class httpProfile:
+    def __init__(self, name):
+        self.name = f5_sanitize(name)
+        self.controls = [ "none" ]
+        self.requires = [ "none" ]
+        self.rules = dict()
+
+    @property
+    def name(self):
+        return self._name
+    @name.setter
+    def name(self, value):
+        self._name = f5_sanitize(value)
+        
+    @property
+    def controls(self):
+        return self._controls
+    @controls.setter
+    def controls(self, value):
+        _valid_controls = [ "none", "forwarding", "caching", "compression", "acceleration", "asm", "avr", "l7dos", "classification", "request-adaptation", "response-adaptation", "server-ssl", "websocket" ]
+        if isinstance(value, list):
+            valid = True
+            for i in value:
+                if i not in _valid_controls:
+                    valid = False
+            if valid:
+                self._controls = value
+        else:
+            self._controls = [ "none" ]
+            
+    @property
+    def requires(self):
+        return self._requires
+    @requires.setter
+    def requires(self, value):
+        _valid_requires = [ "none", "http", "tcp", "client-ssl", "ssl-persist", "classification" ]
+        if isinstance(value, list):
+            valid = True
+            for i in value:
+                if i not in _valid_requires:
+                    valid = False
+            if valid:
+                self._requires = value
+        else:
+            self._requires = [ "none" ]
+
+    @property
+    def loadBalancingMode(self):
+        return self._loadBalancingMode
+    @loadBalancingMode.setter
+    def loadBalancingMode(self, value):
+        _valid_modes = ["dynamic-ratio-member", "dynamic-ratio-node", "fastest-app-response", "fastest-node", "least-connections-member", "least-connections-node", "least-sessions", "observed-member", "observed-node", "predictive-member", "predictive-node", "ratio-least-connections-member", "ratio-least-connections-node", "ratio-member", "ratio-node", "ratio-session", "round-robin", "weighted-least-connections-member", "weighted-least-connections-node"]
+        if value in _valid_modes:
+            self._loadBalancingMode = value
+        else:
+            self._loadBalancingMode= "round-robin"
+
+    def __str__(self):
+        memberString = "[ "
+        for member in self.members:
+            memberString += f"\n\t\t\t{member}"
+        memberString += "]"
+        return f"bigip_pool(name={self.name}, \n\t\tmembers={memberString}"
+    def __repr__(self):
+        memberString = "[ "
+        for member in self.members:
+            memberString += f"\n\t\t\t{member}"
+        memberString += "]"
+        return f"bigip_pool(name={self.name}, \n\t\tmembers={memberString}"
+
+    def tmos_obj(self):
+        members_objs = "\n"
+        for member in self.members:
+            members_objs += f"{member.tmos_obj()}\n"
+        if len(self.members) == 0:
+            return f"""ltm pool /{self.partition}/{self.name} {{
+    allow-snat {self.allowSNAT}
+    allow-nat {self.allowNAT}
+    load-balancing-mode {self.loadBalancingMode}
+    service-down-action {self.serviceDownAction}
+    monitor {self.monitors}
+    min-active-members {self.minActiveMembers}
+}}"""
+        return f"""ltm pool /{self.partition}/{self.name} {{
+    allow-snat {self.allowSNAT}
+    allow-nat {self.allowNAT}
+    load-balancing-mode {self.loadBalancingMode}
+    service-down-action {self.serviceDownAction}
+    members {{ {members_objs}    }}
+    monitor {self.monitors}
+    min-active-members {self.minActiveMembers}
+}}"""
+
+class httpProfile(bigip_obj):
     description = "LTM HTTP Profile"
 
     def __init__(self, name):
@@ -106,7 +201,7 @@ class httpProfile:
     xff-alternative-names {self.xffAlternativeNames}
     redirect-rewrite {self.redirectRewrite}
 }}"""
-class ServerSSLProfile:
+class ServerSSLProfile(bigip_obj):
     description = "LTM ServerSSL Profile"
 
     def __init__(self, name):
@@ -161,7 +256,7 @@ class ServerSSLProfile:
     options {{ {optionsStr} }}
     ciphers {cipherString}
 }}"""
-class ClientSSLProfile:
+class ClientSSLProfile(bigip_obj):
     description = "LTM ClientSSL Profile"
 
     def __init__(self, name):
@@ -242,7 +337,7 @@ class ClientSSLProfile:
     }}{cipherString}{optionsStr}{sniDefaultStr}{sniRequireStr}
 }}"""
 
-class networkProfile:
+class networkProfile(bigip_obj):
     description = "LTM Network Profile"
 
     def __init__(self, name, type):
@@ -304,7 +399,7 @@ class networkProfile:
     idle-timeout {str(self.timeout)}
 }}"""
 
-class monitor:
+class monitor(bigip_obj):
     description = "LTM Monitor"
 
     def __init__(self, name, type):

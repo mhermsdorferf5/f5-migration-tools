@@ -967,6 +967,7 @@ def avi2bigip_virtual(virtual):
         profiles.append(f5_clientssl_parent_profile)
         defaultClientSSLProfile = f5_objects.ClientSSLProfile( f"{virtual.name}_sni_default_clientssl" )
         defaultClientSSLProfile.parent = parentClientSSLProfileName
+        defaultClientSSLProfile.partition = f5_clientssl_parent_profile.partition
         # empty out ciphers, and options, these get picked up from the parent profile.
         defaultClientSSLProfile.options = []
         defaultClientSSLProfile.ciphers = []
@@ -974,6 +975,7 @@ def avi2bigip_virtual(virtual):
         profiles.append(defaultClientSSLProfile)
         f5_virtual.profilesClientSide.append(f"/{defaultClientSSLProfile.partition}/{defaultClientSSLProfile.name}")
         # Now we need to create a default SNI ClientSSL profiel that does get appended to the Virtual.
+        sniPoolMap = { }
         for childVirtual in childrenVirtuals:
             try:
                 f5_clientssl_child_profile = avi2bigip_clientssl_profile(getObjByRef(childVirtual.ssl_profile_ref), getObjByRef(childVirtual.ssl_key_and_certificate_refs[0]))
@@ -983,6 +985,7 @@ def avi2bigip_virtual(virtual):
                 else:
                     log_error("ERROR: clientssl profile: " + childVirtual.ssl_profile_ref + " " + childVirtual.ssl_key_and_certificate_refs[0] + " not able to be converted to bigip object " + str(e))
             f5_clientssl_child_profile.parent = parentClientSSLProfileName
+            f5_clientssl_child_profile.partition = f5_clientssl_parent_profile.partition
             f5_clientssl_child_profile.sniDefault = False
             f5_clientssl_child_profile.sniRequired = True
             profiles.append(f5_clientssl_child_profile)
@@ -991,10 +994,38 @@ def avi2bigip_virtual(virtual):
             # Add to our VIP handled counter:
             global f5VipCount
             f5VipCount += 1
+            if hasattr(childVirtual, 'http_policies'):
+                foundPolicyRules = 0
+                for httpPolicy in childVirtual.http_policies:
+                    try:
+                        httpPolicy = getObjByRef(httpPolicy.http_policy_set_ref)
+                    except Exception as e:
+                        if args.debug:
+                            log_error("HTTP Policy: Can't find policy: " + httpPolicy.http_policy_set_ref + str(e) + " full stack: " + str(traceback.format_exc()))
+                        else:
+                            log_error("HTTP Policy: Can't find policy: " + httpPolicy.http_policy_set_ref + str(e))
+                    if hasattr(httpPolicy, 'http_request_policy'):
+                        for rule in httpPolicy.http_request_policy.rules:
+                            foundPolicyRules += 1
+                            log_debug(f"Virtual: {childVirtual.name} has httpPolicySet with http_request_policy rule: {rule}" )
+                    if hasattr(httpPolicy, 'http_response_policy'):
+                        for rule in httpPolicy.http_response_policy.rules:
+                            foundPolicyRules += 1
+                            log_debug(f"Virtual: {childVirtual.name} has httpPolicySet with http_request_policy rule: {rule}" )
+                if foundPolicyRules == 0:
+                    log_debug("Virtual: " + childVirtual.name + " has http_policies but policy has no rules, ignoring." )
+                else:
+                    log_error("Virtual: " + childVirtual.name + " Don't know how to handle http_policies with http policy rules on VirtualService object." )
            
             # FIXME FIXME FIX ME 
             # Now we need to create LTM Policies to route traffic to the correct pool, etc. 
-            log_error(f"Virtual: {virtual.name} Don't know fully know how to handle type: {virtual.type} Creating VIP but NO LTM POLICIES" )
+            # First we need to add this and any other virtual host domains to a SNI Mapping of hostname => pool_ref
+            for hostname in childVirtual.vh_domain_name:
+                sniPoolMap["hostname"] = childVirtual.pool_ref
+        
+        # Create LTM Policy to reference Pools in Pool List... plus make sure those pools get added to the config
+        
+        log_error(f"Virtual: {virtual.name} Don't know fully know how to handle type: {virtual.type} Creating VIP but NO LTM POLICIES" )
     
 
     # If we have multiple destinations and/or multiple ports, copy our vip to multiple virtuals one per destination port combo.
@@ -1107,7 +1138,7 @@ def writeSslFiles():
             if profile.type == "client-ssl":
                 if profile.partition not in partitionList:
                     partitionList.append(profile.partition)
-                if profile.certFileName != "":
+                if profile.certFileName != "" and "default.crt" not in profile.certFileName:
                     try:
                         f = open(f"{args.sslFileDir}/{profile.partition}___{profile.certFileName}", "w")
                     except Exception as e:
@@ -1117,7 +1148,7 @@ def writeSslFiles():
                     #importScriptFile.write(f"tmsh install sys crypto cert /{profile.partition}/{profile.certFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.certFileName} }}\n")
                     importCommands += f"tmsh install sys crypto cert /{profile.partition}/{profile.certFileName} {{ from-local-file /var/tmp/sslFiles/{profile.partition}___{profile.certFileName} }}\n"
                     f.close()
-                if profile.keyFileName != "":
+                if profile.keyFileName != "" and "default.key" not in profile.keyFileName:
                     try:
                         f = open(f"{args.sslFileDir}/{profile.partition}___{profile.keyFileName}", "w")
                     except Exception as e:
@@ -1216,18 +1247,11 @@ def main() -> int:
         f5_partitions.append(f5_partition)
         avi_tenants.append(avi_tenant_obj)
     
-    for vrf in avi_config.VrfContext:
-        cloud = getRefName(vrf.cloud_ref)
-        if cloud != args.aviCloud:
-            continue
-        vrfName = vrf.name
-        #vrfTenantName =  getRefName(vrf.tenant_ref)
-        for vrf in migration_config.routeDomainMapping:
-            if vrfName == vrf.vrfName:
-                f5_routeDomain = f5_objects.routeDomain(vrfName, vrf.rdID)
-                if hasattr(vrf, 'description'): 
-                    f5_routeDomain.description = vrf.description
-                f5_routeDomains.append(f5_routeDomain)
+    for vrf in migration_config.routeDomainMapping:
+        f5_routeDomain = f5_objects.routeDomain(vrf.vrfName, vrf.rdID)
+        if hasattr(vrf, 'description'): 
+            f5_routeDomain.description = vrf.description
+        f5_routeDomains.append(f5_routeDomain)
     
     for virtual in avi_config.VirtualService:
         tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
