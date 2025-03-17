@@ -589,7 +589,7 @@ def avi2bigip_poolGroup(poolGroup):
                         try:
                             f5_monitor = avi2bigip_monitor(getObjByRef(monitor_ref))
                         except Exception as e:
-                            log_error("Monitor: " + monitor.name + " not able to be converted to bigip object " + str(e))
+                            log_error("Monitor: " + monitor_ref + " not able to be converted to bigip object " + str(e))
                             continue
                         addObjToTenant(f5_monitor)
                         monitorName = f"/{f5_monitor.partition}/{f5_monitor.name}"
@@ -701,7 +701,7 @@ def avi2bigip_pool(pool):
             try:
                 f5_monitor = avi2bigip_monitor(getObjByRef(monitor_ref))
             except Exception as e:
-                log_error("Monitor: " + monitor.name + " not able to be converted to bigip object " + str(e))
+                log_error("Monitor: " + monitor_ref + " not able to be converted to bigip object " + str(e))
                 continue
             addObjToTenant(f5_monitor)
             if index == 0:
@@ -843,7 +843,7 @@ def avi2bigip_virtual(virtual):
     try:
         f5_network_profile = avi2bigip_network_profile(getObjByRef(virtual.network_profile_ref))
     except Exception as e:
-        log_error("Network Profile: " + networkProfile.name + " not able to be converted to bigip object " + str(e))
+        log_error("Network Profile: " + virtual.network_profile_ref + " not able to be converted to bigip object " + str(e))
     
     profiles.append(f5_network_profile)
     f5_virtual.profilesAll.append(f"/{f5_network_profile.partition}/{f5_network_profile.name}")
