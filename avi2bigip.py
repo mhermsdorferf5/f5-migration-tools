@@ -1118,14 +1118,15 @@ def writeBigIpConfig():
     for tenant in avi_tenants:
         if tenant.name == "admin":
             tenant.name = "Common"
-        f.write(f"################################################################################\n")
-        f.write(f"### Tenant: {tenant.name}\t###\n")
-        f.write(f"################################################################################\n")
+        # Skip Empty Tenants:
         if tenant.name != "Common":
             if len(tenant.f5_virtuals) < 1:
                 log_warning(f"Tenant: {tenant.name} has no Virtual Servers.")
-                f.write(f"# Tenant: {tenant.name} has no Virtual Servers skipping all objects.\n")
+                #f.write(f"# Tenant: {tenant.name} has no Virtual Servers skipping all objects.\n")
                 continue
+        f.write(f"################################################################################\n")
+        f.write(f"### Tenant: {tenant.name}\t###\n")
+        f.write(f"################################################################################\n")
         if tenant.name != "Common":
             for partition in f5_partitions:
                 if partition.name == tenant.name:
