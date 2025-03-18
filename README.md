@@ -54,7 +54,8 @@ This was built with configruation exported from a version 22.1.6 controller.  No
 | Short Option | Long Option | Description |
 | -h | --help | Prints application help seen below |
 | -c <aviCloud> | --avi-cloud <aviCloud> | Limits the conversion to the cloud specified, by default this is "VM-Default-Cloud" |
-| -t <aviTenant> | --avi-tenant <aviTenant> | Limits teh conversion the tenant specified, by default it converts all tenants |
+| -t <aviTenant> | --avi-tenant <aviTenant> | Limits the conversion the tenant specified, by default it converts all tenants |
+| -v <aviVirtualService> | --avi-vip <aviVirtualServiceName> | Limits the conversion to that specific Virtual Service |
 | -b <output-config> | --bigip-conf <output-config> | Filename to save the generated BIG-IP configuration to, by default avi_bigip_for_merge.conf |
 | -m <migration-config> | --migration-conf <migration-config> | Filename to read migration configuration from, required for Route Domain Mapping |
 | -s <ssl-directory> | --ssl-file-dir <ssl-directory> | Directory where we should dump the SSL certs/keys and import script, by default it's the current workign directory |
@@ -63,7 +64,10 @@ This was built with configruation exported from a version 22.1.6 controller.  No
 | -d | --debug | Enable debug logging |
 
 ```bash
-usage: avi2bigip.py [-h] [-c AVICLOUD] [-t AVITENANT] [-b BIGIPCONFIGFILE] [-m MIGRATIONCONFIGFILE] [-s SSLFILEDIR] [-f LOGFILE] [-l | --log | --no-log] [-d | --debug | --no-debug] aviJsonFile
+$ python3 avi2bigip.py --help
+usage: avi2bigip.py [-h] [-c AVICLOUD] [-t AVITENANT] [-v AVIVIRTUAL] [-b BIGIPCONFIGFILE] [-m MIGRATIONCONFIGFILE] [-s SSLFILEDIR] [-f LOGFILE]
+                    [-l | --log | --no-log] [-d | --debug | --no-debug]
+                    aviJsonFile
 
 Convert Avi JSON Configuration to BIG-IP Configuration
 
@@ -76,6 +80,8 @@ options:
                         Avi Cloud to convert, by default it converts only the VM-Default-Cloud
   -t AVITENANT, --avi-tenant AVITENANT
                         Avi Tenant to convert, by default it converts all tenants
+  -v AVIVIRTUAL, --avi-virtual AVIVIRTUAL
+                        Avi Virtual Service to convert, by default it converts all Virtual Services
   -b BIGIPCONFIGFILE, --bigip-conf BIGIPCONFIGFILE
                         BIG-IP Configuration File destination, avi_bigip_for_merge.conf by default
   -m MIGRATIONCONFIGFILE, --migration-conf MIGRATIONCONFIGFILE

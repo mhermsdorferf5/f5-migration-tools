@@ -1294,6 +1294,8 @@ def main() -> int:
             continue
         if args.aviTenant != "all" and tenantName != args.aviTenant:
             continue
+        if args.aviVirtual != "all" and virtual.name != args.aviVirtual:
+            continue
         aviVipCount += 1
         try:
             virtuals, profiles = avi2bigip_virtual(virtual)
@@ -1387,6 +1389,7 @@ if __name__ == '__main__':
     parser.add_argument("aviJsonFile", action="store", help="Avi JSON Configuration File")
     parser.add_argument("-c", "--avi-cloud", action="store", dest="aviCloud", default="VM-Default-Cloud", help="Avi Cloud to convert, by default it converts only the VM-Default-Cloud")
     parser.add_argument("-t", "--avi-tenant", action="store", dest="aviTenant", default="all", help="Avi Tenant to convert, by default it converts all tenants")
+    parser.add_argument("-v", "--avi-virtual", action="store", dest="aviVirtual", default="all", help="Avi Virtual Service to convert, by default it converts all Virtual Services")
     parser.add_argument("-b", "--bigip-conf", action="store", dest="bigipConfigFile", default="avi_bigip_for_merge.conf", help="BIG-IP Configuration File destination, avi_bigip_for_merge.conf by default")
     parser.add_argument("-m", "--migration-conf", action="store", dest="migrationConfigFile", default="config.json", help="Configuration File for Migration, config.json by default")
     parser.add_argument("-s", "--ssl-file-dir", action="store", dest="sslFileDir", default="", help="File Directory to dump SSL certs/keys into, by default it uses the current directory.")
