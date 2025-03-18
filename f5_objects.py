@@ -629,7 +629,7 @@ class virtual(bigip_obj):
     source-address-translation {{
         type automap
     }}"""
-        if len(self.irules) > 0:
+        if len(self.irules) == 0:
             rulesStr = "none"
         else:
             rulesStr = "{ "

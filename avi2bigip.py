@@ -249,6 +249,7 @@ def createRedirectVirtual(f5_virtual, ip, rd):
     f5_redirect_virtual = copy.deepcopy(f5_virtual)
     f5_redirect_virtual.name = f5_redirect_virtual.name + "__redirect"
     f5_redirect_virtual.destination = f"{ip}%{rd}:80"
+    f5_redirect_virtual.irules.clear()
     f5_redirect_virtual.irules.append("/Common/_sys_https_redirect")
     f5_redirect_virtual.profilesAll.clear()
     f5_redirect_virtual.profilesClientSide.clear()

@@ -1,22 +1,35 @@
-# f5-migration-tools
+# F5 Migration Tools
 
 This repo is intended to contain migraiton scripts for various system to BIG-IP.  Currently the only tool is to convert Avi to BIG-IP.
 
-# Tools
+## Contents
 
-## json-breakdown.sh
+-[Installation](#installation)
+-[Avi Migration Tool](#avi-migration-tool)
+-[Miscellaneous Tools](#miscellaneous-tools)
 
-This will take in a large json file and break it down into smaller files based on the top level 'list' of objects.  Particularly useful for Avi Configs.
+## Installation
 
-## create-dummy-crypto.py
+Most of these tools are written in python and have dependencies on packages often not included in the system python.  You can either install these as system packages, or you can create a python virtual environment and use pip to install them within the virtual environment.
 
-This will read in all of the files ending with .crt or .key in a directory, and then re-generate the keys and certs with the same filename & x509 subject but with freshly generated dummy key material.  Note that of course these are now self-signed certs.  While we do copy the subject over, other extensions such as SNI are ignored.
+The following instructions create a python venv in the directory 
 
-## Avi Migration
+```bash
+# Create Python virtual environment in ./python-venv
+python3 -m venv ./.python-venv
+# Move shell into the venv:
+source ./.python-venv/bin/activate
+# install/upgrade pip:
+python3 -m pip install --upgrade pip
+# Install required packages/libs:
+python3 -m pip install argparse logging requests
+```
+
+## Avi Migration Tool
 
 This was built with configruation exported from a version 22.1.6 controller.  Note that you do need to export the Avi config with un-encrypted TLS keys, this can only be done via CLI on the Avi Controller.
 
-### Exceptions
+### Migration Exceptions & Traffic Handling Differences
 
 * Virtual Services:
   * VS_TYPE_NORMAL is currently supported
@@ -32,7 +45,8 @@ This was built with configruation exported from a version 22.1.6 controller.  No
     * If XFF replacement is required, we'll need an LTM Policy or iRule to get that functionality.
   * xff_alternate_name: not fully supported, F5's HTTP Profiles only handle inserting xff headers with the industry standard name: X-Forwarded-For.
     * If custom XFF header names are required, that can be done via iRule or LTM Policies.
-  * Client mTLS isn't currently supported.
+  * HTTP MultiPlexing: OneConnect needs to be added to support this.
+* Client mTLS isn't currently supported.
 * Pools:
   * Pool Groups with differing server-side TLS are not supported.
   * Server mTLS isn't currently supported.
@@ -43,11 +57,6 @@ This was built with configruation exported from a version 22.1.6 controller.  No
   * HEALTH_MONITOR_SCTP is not supported
 * No support for Avi WAF Engine.
 * No support for Avi DNS.
-
-### Traffic Handling Differences
-
-* X Forwarding For Headers:
-  * F5 Doesn't natively support the concept of 
 
 ### Program Options
 
@@ -175,3 +184,13 @@ Loading configuration...
   /var/tmp/avi_bigip_for_merge.conf
 [root@localhost:Active:Standalone] config #
 ```
+
+## Miscellaneous Tools
+
+### json-breakdown.sh
+
+This will take in a large json file and break it down into smaller files based on the top level 'list' of objects.  Particularly useful for Avi Configs.
+
+### create-dummy-crypto.py
+
+This will read in all of the files ending with .crt or .key in a directory, and then re-generate the keys and certs with the same filename & x509 subject but with freshly generated dummy key material.  Note that of course these are now self-signed certs.  While we do copy the subject over, other extensions such as SNI are ignored.
