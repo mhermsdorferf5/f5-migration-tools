@@ -218,7 +218,7 @@ class httpProfile(bigip_obj):
     redirect-rewrite {self.redirectRewrite}
 }}"""
 
-class persistenceProfile(bigip_obj):
+class profilesPersistence(bigip_obj):
     description = "LTM Persistence Profile"
 
     def __init__(self, name, type):
@@ -258,9 +258,9 @@ class persistenceProfile(bigip_obj):
             self._type = "source-addr"
 
     def __str__(self):
-        return f"bigip_persistenceProfile(name={self.name}, type={self.type}"
+        return f"bigip_profilesPersistence(name={self.name}, type={self.type}"
     def __repr__(self):
-        return f"bigip_persistenceProfile(name={self.name}, type={self.type}"
+        return f"bigip_profilesPersistence(name={self.name}, type={self.type}"
     def tmos_obj(self):
         if self.type == "source-addr" or self.type == "dest-addr":
             return f"""ltm persistence {self.type} /{self.partition}/{self.name} {{
@@ -689,13 +689,14 @@ class virtual(bigip_obj):
         self.profilesAll = [ ]
         self.profilesClientSide = [ ]
         self.profilesServerSide = [ ]
-        self.persistenceProfile = [ ]
+        self.profilesPersistence = [ ]
         self.partition = "Common"
         self.mask = "255.255.255.255"
         self.snat = True
         self.snatType = "automap"
         self.snatPoolName = ""
         self.irules = []
+        self.ltmPolicies = []
 
 
     @property
@@ -732,6 +733,13 @@ class virtual(bigip_obj):
     source-address-translation {{
         type automap
     }}"""
+        if len(self.ltmPolicies) == 0:
+            policiesStr = "none"
+        else:
+            policiesStr = "{ "
+            for rule in self.ltmPolicies:
+                policiesStr += f"{rule} "
+            policiesStr += "}"
         if len(self.irules) == 0:
             rulesStr = "none"
         else:
@@ -739,11 +747,11 @@ class virtual(bigip_obj):
             for rule in self.irules:
                 rulesStr += f"{rule} "
             rulesStr += "}"
-        if len(self.persistenceProfile) == 0:
+        if len(self.profilesPersistence) == 0:
             persistStr = "none"
         else:
             persistStr = "{ "
-            for i, persist in enumerate(self.persistenceProfile):
+            for i, persist in enumerate(self.profilesPersistence):
                 if i == 0:
                     persistStr += f"{persist} {{ default yes }} "
                 else:
@@ -753,6 +761,7 @@ class virtual(bigip_obj):
     destination {self.destination}
     pool {self.default_pool}
     profiles {{ {profiles}    }} {snatConfig}
-    rules {rulesStr}
     persist {persistStr}
+    rules {rulesStr}
+    policies {policiesStr}
 }}"""

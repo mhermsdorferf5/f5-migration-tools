@@ -228,7 +228,7 @@ def addObjToTenant(obj):
                     addToList = tenant.f5_policies
                 case "iRule":
                     addToList = tenant.f5_rules
-                case "profile" | "httpProfile" | "networkProfile" | "ClientSSLProfile" | "ServerSSLProfile" | "persistenceProfile" | "oneconnectProfile":
+                case "profile" | "httpProfile" | "networkProfile" | "ClientSSLProfile" | "ServerSSLProfile" | "profilesPersistence" | "oneconnectProfile":
                     addToList = tenant.f5_profiles
                 case _:
                     log_error(f"Adding Object: {obj.name} not added to any tenant, no tenant found of type {objType} in tenant: {tenantNameForAdd}.")
@@ -341,7 +341,7 @@ def avi2bigip_persistence_profile(aviPersistenceProfile):
 
     match aviPersistenceProfile.persistence_type:
         case "PERSISTENCE_TYPE_CLIENT_IP_ADDRESS":
-            f5_profile = f5_objects.persistenceProfile(aviPersistenceProfile.name, "source-addr") 
+            f5_profile = f5_objects.profilesPersistence(aviPersistenceProfile.name, "source-addr") 
             f5_profile.partition = tenantName
             if hasattr(aviPersistenceProfile.ip_persistence_profile, 'ip_persistent_timeout'):
                 # Avi's timeout is in min, so times it by 60 for F5's timeout in seconds.
@@ -349,7 +349,7 @@ def avi2bigip_persistence_profile(aviPersistenceProfile):
             if hasattr(aviPersistenceProfile.ip_persistence_profile, 'ip_mask'):
                 log_warning(f"Persistence Profile: {aviPersistenceProfile.name} Don't know how to handle ip_mask")
         case "PERSISTENCE_TYPE_HTTP_COOKIE":
-            f5_profile = f5_objects.persistenceProfile(aviPersistenceProfile.name, "cookie") 
+            f5_profile = f5_objects.profilesPersistence(aviPersistenceProfile.name, "cookie") 
             f5_profile.partition = tenantName
         case _:
             log_error(f"Persistence Profile: {aviPersistenceProfile.name} Don't know how to handle persistence type: {aviPersistenceProfile.persistence_type}")
@@ -622,6 +622,7 @@ def avi2bigip_poolGroup(poolGroup):
     f5_members = []
     vrfName = ""
     serverSideSSLProfileRef = ""
+    persistenceProfileRef  = ""
     serviceDownAction = ""
     monitorList = ""
     for subPoolIndex, subPool in enumerate(poolGroup.members):
@@ -676,6 +677,13 @@ def avi2bigip_poolGroup(poolGroup):
                         log_debug(f"Pool Group: {poolGroupName} Found SSL Profile: {serverSideSSLProfileRef} inside {pool.name}.")
                     elif serverSideSSLProfileRef != pool.ssl_profile_ref:
                         log_warning(f"Pool Group: {poolGroupName} Don't know how to handle multiple SSL Profiles in Pool Group, using: {serverSideSSLProfileRef} Found: {pool.ssl_profile_ref} inside {pool.name}.")
+                       
+                if hasattr(pool, 'application_persistence_profile_ref'): 
+                    if persistenceProfileRef == "":
+                        persistenceProfileRef = pool.application_persistence_profile_ref
+                        log_debug(f"Pool Group: {poolGroupName} Found SSL Profile: {persistenceProfileRef} inside {pool.name}.")
+                    elif serverSideSSLProfileRef != pool.ssl_profile_ref:
+                        log_warning(f"Pool Group: {poolGroupName} Don't know how to handle multiple Persistence Profiles in Pool Group, using: {persistenceProfileRef} Found: {pool.application_persistence_profile_ref} inside {pool.name}.")
                         
                 vrfName    =  getRefName(pool.vrf_ref)
                 for vrf in migration_config.routeDomainMapping:
@@ -709,7 +717,7 @@ def avi2bigip_poolGroup(poolGroup):
     f5_pool.minActiveMembers = poolGroup.min_servers
     f5_pool.monitors = monitorList
     
-    return f5_pool, serverSideSSLProfileRef
+    return f5_pool, serverSideSSLProfileRef, persistenceProfileRef
 
 
 def avi2bigip_pool(pool):
@@ -818,22 +826,17 @@ def avi2bigip_virtual(virtual):
     match virtual.type:
         case "VS_TYPE_NORMAL":
             sniParent = False
+            sniChild = False
         case "VS_TYPE_VH_PARENT":
             # If we have a parent vip, go find all the children vips and put them into a list.
             sniParent = True
-            parentUUID = virtual.uuid
-            if hasattr(virtual, "vh_child_vs_uuid"):
-                childrenUUIDs = virtual.extension.vh_child_vs_uuid
-                childrenVirtuals = []
-                for testVirtual in avi_config.VirtualService:
-                    if testVirtual.uuid in childrenUUIDs:
-                        childrenVirtuals.append(testVirtual)
-                        aviVirtualServiceCount += 1
-            else:
-                log_error(f"Virtual: {virtual.name} is type: {virtual.type} but has no children specified in vh_child_vs_uuid")
+            sniChild = False
         case "VS_TYPE_VH_CHILD":
+            sniParent = False
             sniChild = True
         case _:
+            sniParent = False
+            sniChild = False
             log_error("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
             raise Exception("Virtual: " + virtual.name + " Don't know how to handle type: " + virtual.type )
 
@@ -915,7 +918,7 @@ def avi2bigip_virtual(virtual):
         
     if hasattr(virtual, 'pool_group_ref'):
         try:
-            f5_pool, serverSideSSLProfileRef = avi2bigip_poolGroup(getObjByRef(virtual.pool_group_ref))
+            f5_pool, serverSideSSLProfileRef, persistenceProfileRef = avi2bigip_poolGroup(getObjByRef(virtual.pool_group_ref))
         except Exception as e:
             if args.debug:
                 log_error("Pool: " + virtual.pool_group_ref + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
@@ -1059,14 +1062,28 @@ def avi2bigip_virtual(virtual):
             else:
                 log_error("ERROR: persistence profile: " + persistenceProfileRef + " not able to be converted to bigip object " + str(e))
         
-        f5_virtual.persistenceProfile.append(f"/{f5_persistence_profile.partition}/{f5_persistence_profile.name}")
+        f5_virtual.profilesPersistence.append(f"/{f5_persistence_profile.partition}/{f5_persistence_profile.name}")
         addObjToTenant(f5_persistence_profile)
         
         
     
     # Now Handle SNI Parent Virtual and all children virtuals, SSL Profiles, and Content Switching
-    if sniParent:
-        log_debug(f"Virtual: {virtual.name} is a SNI Parent Virtual, building Child SSL profiles and content switching.")
+    if sniParent and not sniChild:
+        if hasattr(virtual.extension, 'vh_child_vs_uuid'):
+            childrenUUIDs = virtual.extension.vh_child_vs_uuid
+            childrenVirtuals = []
+            for testVirtual in avi_config.VirtualService:
+                if testVirtual.uuid in childrenUUIDs:
+                    childrenVirtuals.append(testVirtual)
+                    aviVirtualServiceCount += 1
+            if len(childrenVirtuals) == 0:
+                log_error(f"Virtual: {virtual.name} is type: {virtual.type} but has no children specified in vh_child_vs_uuid")
+        else:
+            log_error(f"Virtual: {virtual.name} is type: {virtual.type} but has no children specified in vh_child_vs_uuid")
+            raise Exception(f"Virtual: {virtual.name} is type: {virtual.type} but has no children specified in vh_child_vs_uuid")
+            
+        log_debug(f"Virtual: {virtual.name} is a SNI Parent Virtual, building Child SSL profiles and content switching total of: {len(childrenVirtuals)}.")
+        
         try:
             f5_clientssl_parent_profile = avi2bigip_clientssl_profile(getObjByRef(virtual.ssl_profile_ref), getObjByRef(virtual.ssl_key_and_certificate_refs[0]))
         except Exception as e:
@@ -1086,6 +1103,7 @@ def avi2bigip_virtual(virtual):
         defaultClientSSLProfile.sniDefault = True
         addObjToTenant(defaultClientSSLProfile)
         f5_virtual.profilesClientSide.append(f"/{defaultClientSSLProfile.partition}/{defaultClientSSLProfile.name}")
+        
         # Now we need to create a default SNI ClientSSL profiel that does get appended to the Virtual.
         sniPoolMap = { }
         for childVirtual in childrenVirtuals:
@@ -1119,13 +1137,17 @@ def avi2bigip_virtual(virtual):
             for hostname in childVirtual.vh_domain_name:
                 sniPoolMap[hostname] = f5_child_virtuals[0].default_pool
                 
+            if len(f5_child_virtuals[0].profilesPersistence) > 0:
+                f5_virtual.persist.append(f"{f5_child_virtuals[0].profilesPersistence}")
+                
+                
             # Add to our Virtual Service handled counter:
             f5VirtualServiceHandledCount += 1
-
             
         # Create LTM Policy to reference Pools in Pool List... plus make sure those pools get added to the config
         ltmPolicyName = f"{f5_virtual.name}__ltm_policy"
         ltmPolicy = createSNIRoutingLTMPolicy(ltmPolicyName, f5_virtual.partition, sniPoolMap)
+        f5_virtual.ltmPolicies.append(f"/{ltmPolicy.partition}/{ltmPolicy.name}")
         addObjToTenant(ltmPolicy)
 
     # If we have multiple destinations and/or multiple ports, copy our vip to multiple virtuals one per destination port combo.
