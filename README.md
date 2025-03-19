@@ -37,7 +37,7 @@ This was built with configruation exported from a version 22.1.6 controller.  No
   * VS_TYPE_NORMAL is currently supported
   * VS_TYPE_PARENT & VS_TYPE_CHILD is supported for SNI parent/child handling only.
   * Only HTTP and L4 type VIPs currently supported.
-  * Network Security Policies are not supported
+  * Network Security Policies are not fully supported.
   * Analytics Profiles are not supported.
   * HTTP Policies are not supported (no content switching)
 * HTTP Profiles:

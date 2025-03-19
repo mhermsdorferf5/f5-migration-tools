@@ -75,6 +75,9 @@ class avi_tenant:
         self.f5_apps = []
         self.f5_profiles = []
         self.f5_policies = []
+        self.f5_addrLists = []
+        self.f5_afmRuleSets = []
+        self.f5_afmPolicies = []
     def __repr__(self):
         virtualString= "[ "
         for virtual in self.f5_virtuals:
@@ -230,6 +233,10 @@ def addObjToTenant(obj):
                     addToList = tenant.f5_rules
                 case "profile" | "httpProfile" | "networkProfile" | "ClientSSLProfile" | "ServerSSLProfile" | "profilesPersistence" | "oneconnectProfile":
                     addToList = tenant.f5_profiles
+                case "addressList":
+                    addToList = tenant.f5_addrLists
+                case "firewallPolicy":
+                    addToList = tenant.f5_afmPolicies
                 case _:
                     log_error(f"Adding Object: {obj.name} not added to any tenant, no tenant found of type {objType} in tenant: {tenantNameForAdd}.")
             log_debug(f"Adding Object: FOUND TENANT {tenantName} for {obj.name} tenant contains {len(addToList)} .")
@@ -335,7 +342,89 @@ def avi2bigip_http_profile(aviApplicationProfile):
         f5_profile.partition = "Common"
     return f5_profile
 
+def avi2bigip_addressList(aviIPAddrGroup):
+
+    tenantName =  f5_objects.f5_sanitize(getRefName(aviIPAddrGroup.tenant_ref))
+
+    f5_addressList = f5_objects.addressList(aviIPAddrGroup.name) 
+    f5_addressList.partition = tenantName
+   
+    if hasattr(aviIPAddrGroup, 'prefixes'):
+        for addr in aviIPAddrGroup.prefixes:
+            f5_addressList.addresses.append(f"{addr.ip_addr.addr}/{addr.mask}")
+        
+    if hasattr(aviIPAddrGroup, 'country_codes'):
+        for countryCode in aviIPAddrGroup.country_codes:
+            f5_addressList.geos.append(f"countryCode")
+        
+    if tenantName == "admin":
+        f5_addressList.partition = "Common"
+    return f5_addressList
+
+def avi2bigip_firewall_policy(aviNetworkSecurityPolicy):
+
+    tenantName =  f5_objects.f5_sanitize(getRefName(aviNetworkSecurityPolicy.tenant_ref))
+
+    f5_firewallPolicy = f5_objects.firewallPolicy(aviNetworkSecurityPolicy.name) 
+    f5_firewallPolicy.partition = tenantName
+    
+    if not hasattr(aviNetworkSecurityPolicy, 'rules'):
+        return f5_firewallPolicy
+   
+    # Check if we need to append a defualt deny, 
+    # If any rule has a if any rule has negative match condition: IS_NOT_IN
+    # followed by a deny then we must default deny, as F5 has no "NOT" conditional
+    # In firewall policies/rules:
+    defaultDeny = False
+    # if ther are no rules, return the empty policy.
+        
+    rulesHandled = 0
+    aviRuleCount = len(aviNetworkSecurityPolicy.rules)
+    for rule in aviNetworkSecurityPolicy.rules:
+        if hasattr(rule, 'match'):
+            # only support client_ip today:
+            if hasattr(rule.match, 'client_ip'):
+                if rule.match.client_ip.match_criteria == "IS_NOT_IN" and rule.action == "NETWORK_SECURITY_POLICY_ACTION_TYPE_DENY":
+                    if defaultDeny:
+                        log_warning(f"Network Security Policy: {aviNetworkSecurityPolicy.name} Rule: {rule.name} contains multiple deny rules with match_criteria \"IS_NOT_IN\"")
+                    defaultDeny = True
+                f5_addrLists = []
+                for addrGroupRef in rule.match.client_ip.group_refs:
+                    aviAddrGroup = getObjByRef(addrGroupRef)
+                    f5_addrList = avi2bigip_addressList(aviAddrGroup)
+                    f5_addrLists.append(f"/{f5_addrList.partition}/{f5_addrList.name}")
+                    addObjToTenant(f5_addrList)
+                f5_addrListsStr = ""
+                for addrListStr in f5_addrLists:
+                    f5_addrListsStr += f"\n\t\t\t\t\t{addrListStr}"
+                f5_firewallPolicy.rules.append(f"""
+        {rule.name} {{
+            action accept
+            ip-protocol any
+            source {{
+                address-lists {{ {f5_addrListsStr}
+                }}
+            }}
+        }}""")
+                rulesHandled += 1
+    
+    if defaultDeny:
+        f5_firewallPolicy.rules.append("""
+        deny_all {
+            action reject
+            ip-protocol any
+        }""")
+        
+    if tenantName == "admin":
+        f5_firewallPolicy.partition = "Common"
+    
+    if rulesHandled != aviRuleCount:
+        log_warning(f"Network Security Policy: {aviNetworkSecurityPolicy.name} contains {aviRuleCount} but only {rulesHandled} converted to BIG-IP.")
+        
+    return f5_firewallPolicy
+
 def avi2bigip_persistence_profile(aviPersistenceProfile):
+    
 
     tenantName =  f5_objects.f5_sanitize(getRefName(aviPersistenceProfile.tenant_ref))
 
@@ -998,6 +1087,22 @@ def avi2bigip_virtual(virtual):
             case _:
                 log_warning("Application Profile: " + aviApplicationProfile.name + " Don't know how to handle type: " + aviApplicationProfile.type)
     
+    if hasattr(virtual, 'network_security_policy_ref'):
+        try:
+            afmPolicy = avi2bigip_firewall_policy(getObjByRef(virtual.network_security_policy_ref))
+        except Exception as e:
+            if args.debug:
+                log_error(f"Network Security Policy: Can't convert: {virtual.network_security_policy_ref} {str(e)} full stack: {str(traceback.format_exc())}")
+            else:
+                log_error(f"Network Security Policy: Can't convert: {virtual.network_security_policy_ref} {str(e)}")
+                
+        if len(afmPolicy.rules) > 0:
+            addObjToTenant(afmPolicy)
+            f5_virtual.fwEnforcedPolicy = f"/{afmPolicy.partition}/{afmPolicy.name}"
+        else:
+            log_debug(f"Network Security Policy: Converted: {virtual.network_security_policy_ref} but no rules found, ignoring.")
+            
+        
     if hasattr(virtual, 'http_policies'):
         foundPolicyRules = 0
         for httpPolicy in virtual.http_policies:
@@ -1238,6 +1343,12 @@ def writeBigIpConfig():
             f.write(profile.tmos_obj() + "\n")
         f.write(f"### Tenant: {tenant.name}\tLTM Policies###\n")
         for policy in tenant.f5_policies:
+            f.write(policy.tmos_obj() + "\n")
+        f.write(f"### Tenant: {tenant.name}\tAddress Lists###\n")
+        for addrList in tenant.f5_addrLists:
+            f.write(addrList.tmos_obj() + "\n")
+        f.write(f"### Tenant: {tenant.name}\tAFM Policies###\n")
+        for policy in tenant.f5_afmPolicies:
             f.write(policy.tmos_obj() + "\n")
         f.write(f"### Tenant: {tenant.name}\tVirtual Servers ###\n")
         for virtual in tenant.f5_virtuals:

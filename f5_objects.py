@@ -60,6 +60,83 @@ class bigip_obj:
     def __repr__(self):
         return f"bigip_obj(name='{self.name}', description='{self.description}')"
     
+class addressList(bigip_obj):
+    description = "Security Address List"
+
+    def __init__(self, name):
+        self.name = f5_sanitize(name)
+        self.partition = "Common"
+        self.addresses = []
+        self.geos = []
+        self.fqdns = []
+
+    @property
+    def name(self):
+        return self._name
+    @name.setter
+    def name(self, value):
+        self._name = f5_sanitize(value)
+
+    def __str__(self):
+        return f"bigip_addressList(name={self.name}"
+    def __repr__(self):
+        return f"bigip_addressList(name={self.name}"
+    def tmos_obj(self):
+        if len(self.addresses) > 0:
+            addressStr = "{"
+            for addr in self.addresses:
+                addressStr += f"\n\t\t{addr} {{ }}"
+            addressStr += "\n\t}"
+        else:
+            addressStr = "none"
+        if len(self.geos) > 0:
+            geoStr = "{}"
+            for geo in self.geos:
+                geoStr += f"\n\t\t{geo} {{ }}"
+            geoStr += "\n\t}"
+        else:
+            geoStr = "none"
+        if len(self.fqdns) > 0:
+            fqdnStr = "{"
+            for fqdn in self.fqdns:
+                fqdnStr += f"\n\t\t{fqdn} {{ }}"
+            fqdnStr += "\n\t}"
+        else:
+            fqdnStr = "none"
+        return f"""security shared-objects address-list /{self.partition}/{self.name} {{
+    addresses {addressStr}
+    geo {geoStr}
+    fqdns {fqdnStr}
+}}"""
+
+class firewallPolicy(bigip_obj):
+    description = "AFM Firewall Policy"
+
+    def __init__(self, name):
+        self.name = f5_sanitize(name)
+        self.partition = "Common"
+        self.rules = []
+
+    @property
+    def name(self):
+        return self._name
+    @name.setter
+    def name(self, value):
+        self._name = f5_sanitize(value)
+
+    def __str__(self):
+        return f"bigip_firewallPolicy(name={self.name}"
+    def __repr__(self):
+        return f"bigip_firewallPolicy(name={self.name}"
+    def tmos_obj(self):
+        rulesStr = ""
+        for rule in self.rules:
+            rulesStr += f"{rule}"
+        return f"""security firewall policy /{self.partition}/{self.name} {{
+    rules {{ {rulesStr}
+    }}
+}}"""
+    
 class ltmPolicy(bigip_obj):
     description = "LTM Policy"
 
@@ -697,6 +774,8 @@ class virtual(bigip_obj):
         self.snatPoolName = ""
         self.irules = []
         self.ltmPolicies = []
+        self.fwEnforcedPolicy = "none"
+        self.fwStagedPolicy = "none"
 
 
     @property
@@ -764,4 +843,6 @@ class virtual(bigip_obj):
     persist {persistStr}
     rules {rulesStr}
     policies {policiesStr}
+    fw-enforced-policy {self.fwEnforcedPolicy}
+    fw-staged-policy {self.fwStagedPolicy}
 }}"""
