@@ -138,6 +138,39 @@ class ltmPolicy(bigip_obj):
     strategy {self.strategy}
 }}"""
 
+class oneconnectProfile(bigip_obj):
+    description = "LTM OneConnect Profile"
+
+    def __init__(self, name):
+        self.name = f5_sanitize(name)
+        self.type = "oneconnect"
+        self.partition = "Common"
+        self.maxAge = 86400
+        self.maxReuse = 1000
+        self.maxSize = 10000
+        self.sourceMask = "any"
+
+    @property
+    def name(self):
+        return self._name
+    @name.setter
+    def name(self, value):
+        self._name = f5_sanitize(value)
+
+    def __str__(self):
+        return f"bigip_oneconnectProfile(name={self.name}"
+    def __repr__(self):
+        return f"bigip_oneconnectpProfile(name={self.name}"
+    def tmos_obj(self):
+        return f"""ltm profile one-connect /{self.partition}/{self.name} {{
+    defaults-from oneconnect
+    idle-timeout-override disabled
+    max-age {self.maxAge}
+    max-reuse {self.maxReuse}
+    max-size {self.maxSize} 
+    source-mask {self.sourceMask}
+}}"""
+
 class httpProfile(bigip_obj):
     description = "LTM HTTP Profile"
 
@@ -184,6 +217,74 @@ class httpProfile(bigip_obj):
     xff-alternative-names {self.xffAlternativeNames}
     redirect-rewrite {self.redirectRewrite}
 }}"""
+
+class persistenceProfile(bigip_obj):
+    description = "LTM Persistence Profile"
+
+    def __init__(self, name, type):
+        self.name = f5_sanitize(name)
+        self.type = type 
+        self.timeout = "3600"
+        self.matchAcrossPools = "disabled"
+        self.matchAcrossServices = "disabled"
+        self.matchAcrossVirtuals = "disabled"
+        self.mask = "none"
+        self.mirror = "disabled"
+        self.hashAlgorithm = "default"
+        self.method = "insert"
+        self.cookieEncryption = "required"
+        self.cookieEncryptionPassphrase = "Avi_Migration_Cookie_Passphrase_FIXME_FIXME_FIXME_FIXME"
+        self.encryptCookiePoolname = "enabled"
+        self.expiration = "0"
+        self.httpOnly = "enabled"
+        self.secure = "enabled"
+
+    @property
+    def name(self):
+        return self._name
+    @name.setter
+    def name(self, value):
+        self._name = f5_sanitize(value)
+
+    @property
+    def type(self):
+        return self._type
+    @type.setter
+    def type(self, value):
+        _valid_types = [ "cookie", "dest-addr", "source-addr", "hash" ]
+        if value in _valid_types:
+            self._type = value
+        else:
+            self._type = "source-addr"
+
+    def __str__(self):
+        return f"bigip_persistenceProfile(name={self.name}, type={self.type}"
+    def __repr__(self):
+        return f"bigip_persistenceProfile(name={self.name}, type={self.type}"
+    def tmos_obj(self):
+        if self.type == "source-addr" or self.type == "dest-addr":
+            return f"""ltm persistence {self.type} /{self.partition}/{self.name} {{
+    timeout {self.timeout}
+    mask {self.mask}
+    hash-algorithm  {self.hashAlgorithm}
+    match-across-pools {self.matchAcrossPools}
+    match-across-services {self.matchAcrossServices}
+    match-across-virtuals {self.matchAcrossVirtuals}
+    mirror {self.mirror}
+}}"""
+        if self.type == "cookie":
+            return f"""ltm persistence {self.type} /{self.partition}/{self.name} {{
+    defaults-from cookie
+    timeout {self.timeout}
+    method {self.method}
+    cookie-encryption {self.cookieEncryption}
+    cookie-encryption-passphrase "{self.cookieEncryptionPassphrase}"
+    encrypt-cookie-poolname {self.encryptCookiePoolname}
+    expiration {self.expiration}
+    httpOnly {self.httpOnly}
+    secure {self.secure}
+}}"""
+
 class ServerSSLProfile(bigip_obj):
     description = "LTM ServerSSL Profile"
 
@@ -239,6 +340,7 @@ class ServerSSLProfile(bigip_obj):
     options {{ {optionsStr} }}
     ciphers {cipherString}
 }}"""
+
 class ClientSSLProfile(bigip_obj):
     description = "LTM ClientSSL Profile"
 
@@ -587,6 +689,7 @@ class virtual(bigip_obj):
         self.profilesAll = [ ]
         self.profilesClientSide = [ ]
         self.profilesServerSide = [ ]
+        self.persistenceProfile = [ ]
         self.partition = "Common"
         self.mask = "255.255.255.255"
         self.snat = True
@@ -636,9 +739,20 @@ class virtual(bigip_obj):
             for rule in self.irules:
                 rulesStr += f"{rule} "
             rulesStr += "}"
+        if len(self.persistenceProfile) == 0:
+            persistStr = "none"
+        else:
+            persistStr = "{ "
+            for i, persist in enumerate(self.persistenceProfile):
+                if i == 0:
+                    persistStr += f"{persist} {{ default yes }} "
+                else:
+                    persistStr += f"{persist} {{ default no }} "
+            persistStr += "}"
         return f"""ltm virtual /{self.partition}/{self.name} {{
     destination {self.destination}
     pool {self.default_pool}
     profiles {{ {profiles}    }} {snatConfig}
     rules {rulesStr}
+    persist {persistStr}
 }}"""

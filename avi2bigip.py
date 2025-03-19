@@ -167,6 +167,8 @@ def getObjByRef(ref):
             testList = avi_config.SSLKeyAndCertificate
         case "networkprofile":
             testList = avi_config.NetworkProfile
+        case "applicationpersistenceprofile":
+            testList = avi_config.ApplicationPersistenceProfile
         case "applicationprofile":
             testList = avi_config.ApplicationProfile
         case "healthmonitor":
@@ -226,6 +228,8 @@ def addObjToTenant(obj):
                     addToList = tenant.f5_policies
                 case "iRule":
                     addToList = tenant.f5_rules
+                case "profile" | "httpProfile" | "networkProfile" | "ClientSSLProfile" | "ServerSSLProfile" | "persistenceProfile" | "oneconnectProfile":
+                    addToList = tenant.f5_profiles
                 case _:
                     log_error(f"Adding Object: {obj.name} not added to any tenant, no tenant found of type {objType} in tenant: {tenantNameForAdd}.")
             log_debug(f"Adding Object: FOUND TENANT {tenantName} for {obj.name} tenant contains {len(addToList)} .")
@@ -294,8 +298,12 @@ def avi2bigip_http_profile(aviApplicationProfile):
     f5_profile.partition = tenantName
 
     if hasattr(aviApplicationProfile, 'http_profile'):
-        if aviApplicationProfile.http_profile.connection_multiplexing_enabled is False:
+        if aviApplicationProfile.http_profile.connection_multiplexing_enabled is True:
             f5_profile.oneconnectTransformations = "enabled"
+        else:
+            f5_profile.oneconnectTransformations = "disabled"
+            
+            
         # Only set max header if it's above F5 Default of 64
         if aviApplicationProfile.http_profile.max_header_count > 64:
             f5_profile.maxHeaderCount = aviApplicationProfile.http_profile.max_header_count
@@ -327,6 +335,30 @@ def avi2bigip_http_profile(aviApplicationProfile):
         f5_profile.partition = "Common"
     return f5_profile
 
+def avi2bigip_persistence_profile(aviPersistenceProfile):
+
+    tenantName =  f5_objects.f5_sanitize(getRefName(aviPersistenceProfile.tenant_ref))
+
+    match aviPersistenceProfile.persistence_type:
+        case "PERSISTENCE_TYPE_CLIENT_IP_ADDRESS":
+            f5_profile = f5_objects.persistenceProfile(aviPersistenceProfile.name, "source-addr") 
+            f5_profile.partition = tenantName
+            if hasattr(aviPersistenceProfile.ip_persistence_profile, 'ip_persistent_timeout'):
+                # Avi's timeout is in min, so times it by 60 for F5's timeout in seconds.
+                f5_profile.timeout = aviPersistenceProfile.ip_persistence_profile.ip_persistent_timeout * 60
+            if hasattr(aviPersistenceProfile.ip_persistence_profile, 'ip_mask'):
+                log_warning(f"Persistence Profile: {aviPersistenceProfile.name} Don't know how to handle ip_mask")
+        case "PERSISTENCE_TYPE_HTTP_COOKIE":
+            f5_profile = f5_objects.persistenceProfile(aviPersistenceProfile.name, "cookie") 
+            f5_profile.partition = tenantName
+        case _:
+            log_error(f"Persistence Profile: {aviPersistenceProfile.name} Don't know how to handle persistence type: {aviPersistenceProfile.persistence_type}")
+            raise Exception(f"Persistence Profile: {aviPersistenceProfile.name} Don't know how to handle persistence type: {aviPersistenceProfile.persistence_type}")
+
+    if tenantName == "admin":
+        f5_profile.partition = "Common"
+    return f5_profile
+
 def avi2bigip_cipherMapping(aviCipherString):
     f5Ciphers = []
     aviCipherList = aviCipherString.split(":")
@@ -335,13 +367,13 @@ def avi2bigip_cipherMapping(aviCipherString):
     for cipher in aviCipherList:
         replaced = 0
         for cipherMap in migration_config.cipherStringMapping:
-            log_debug(f"Checking Cipher: {cipher.lower()} against {cipherMap.aviCipher.lower()}")
+            #log_debug(f"Checking Cipher: {cipher.lower()} against {cipherMap.aviCipher.lower()}")
             if cipherMap.aviCipher.lower() == cipher.lower():
                 log_debug(f"Replacing Cipher: {cipher.lower()} with {cipherMap.f5Cipher.lower()}")
                 f5Ciphers.append(f"{cipherMap.f5Cipher.lower()}")
                 replaced = 1
         if replaced == 0:
-            log_debug(f"Appending Cipher: {cipher.lower()} to list.")
+            #log_debug(f"Appending Cipher: {cipher.lower()} to list.")
             f5Ciphers.append(f"{cipher.lower()}")
     return f5Ciphers
     
@@ -765,7 +797,13 @@ def avi2bigip_pool(pool):
     return f5_pool
 
 def avi2bigip_virtual(virtual):
-
+    # Global Counters....
+    global aviVipAddrCount
+    global f5VipCount
+    global f5VirtualServiceHandledCount
+    global aviVirtualServiceCount
+    global redirectVipFound
+    
     tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
     # List of F5 virtuals, this allows us to handle splitting
     virtuals = []
@@ -773,7 +811,6 @@ def avi2bigip_virtual(virtual):
     policies = []
     rules = []
 
-    redirectVipFound = 0
     sniParent = False
     sniChild = False
 
@@ -785,11 +822,15 @@ def avi2bigip_virtual(virtual):
             # If we have a parent vip, go find all the children vips and put them into a list.
             sniParent = True
             parentUUID = virtual.uuid
-            childrenUUIDs = virtual.extension.vh_child_vs_uuid
-            childrenVirtuals = []
-            for testVirtual in avi_config.VirtualService:
-                if testVirtual.uuid in childrenUUIDs:
-                    childrenVirtuals.append(testVirtual)
+            if hasattr(virtual, "vh_child_vs_uuid"):
+                childrenUUIDs = virtual.extension.vh_child_vs_uuid
+                childrenVirtuals = []
+                for testVirtual in avi_config.VirtualService:
+                    if testVirtual.uuid in childrenUUIDs:
+                        childrenVirtuals.append(testVirtual)
+                        aviVirtualServiceCount += 1
+            else:
+                log_error(f"Virtual: {virtual.name} is type: {virtual.type} but has no children specified in vh_child_vs_uuid")
         case "VS_TYPE_VH_CHILD":
             sniChild = True
         case _:
@@ -847,12 +888,18 @@ def avi2bigip_virtual(virtual):
 
     # Use this to handle ServerSSL Config, based on Avi Pool
     serverSideSSLProfileRef = ""
+    persistenceProfileRef = ""
     # Figure out pool:
     default_pool = "none"
     if hasattr(virtual, 'pool_ref'):
         pool = getObjByRef(virtual.pool_ref)
+        # Check for ServersideSSL (based on pool in Avi Land)
         if hasattr(pool, 'ssl_profile_ref'):
             serverSideSSLProfileRef = pool.ssl_profile_ref
+        # Now check for persistence (based on pool in Avi Land):
+        if hasattr(pool, 'application_persistence_profile_ref'):
+            persistenceProfileRef = pool.application_persistence_profile_ref
+            
         try:
             f5_pool = avi2bigip_pool(getObjByRef(virtual.pool_ref))
         except Exception as e:
@@ -863,6 +910,8 @@ def avi2bigip_virtual(virtual):
         addObjToTenant(f5_pool)
         # Add Pool to Virtual Config:
         default_pool =  f"/{f5_pool.partition}/{f5_pool.name}"
+        
+            
         
     if hasattr(virtual, 'pool_group_ref'):
         try:
@@ -887,7 +936,7 @@ def avi2bigip_virtual(virtual):
     except Exception as e:
         log_error("Network Profile: " + virtual.network_profile_ref + " not able to be converted to bigip object " + str(e))
     
-    profiles.append(f5_network_profile)
+    addObjToTenant(f5_network_profile)
     f5_virtual.profilesAll.append(f"/{f5_network_profile.partition}/{f5_network_profile.name}")
 
     # Now Application Profile, if it has one.
@@ -922,8 +971,13 @@ def avi2bigip_virtual(virtual):
                     f5_virtual.snat = True
                     f5_virtual.snat_type = "automap"
                 
-                profiles.append(http_profile)
+                addObjToTenant(http_profile)
                 f5_virtual.profilesAll.append(f"/{http_profile.partition}/{http_profile.name}")
+                # If we're doing http, we also need oneconnect
+                if http_profile.oneconnectTransformations == "enabled":
+                    oneconnectProfile = f5_objects.oneconnectProfile("avi_migrated_oneconnect")
+                    addObjToTenant(oneconnectProfile)
+                    f5_virtual.profilesAll.append(f"/Common/avi_migrated_oneconnect")
             case "APPLICATION_PROFILE_TYPE_L4":
                 if aviApplicationProfile.preserve_client_ip is True:
                     f5_virtual.snat = False
@@ -962,7 +1016,7 @@ def avi2bigip_virtual(virtual):
         if foundPolicyRules == 0:
             log_debug("Virtual: " + virtual.name + " has http_policies but policy has no rules, ignoring." )
         else:
-            log_error("Virtual: " + virtual.name + " Don't know how to handle http_policies with http policy rules on VirtualService object." )
+            log_error("Virtual: " + virtual.name + " Don't know how to handle http_policies with http policy with rules on VirtualService object." )
     
 
     # Now Client SSL Profile, if it has one.
@@ -978,7 +1032,7 @@ def avi2bigip_virtual(virtual):
                 log_error("ERROR: clientssl profile: " + virtual.ssl_profile_ref + " " + virtual.ssl_key_and_certificate_refs[0] + " not able to be converted to bigip object " + str(e))
         
         f5_virtual.profilesClientSide.append(f"/{f5_clientssl_profile.partition}/{f5_clientssl_profile.name}")
-        profiles.append(f5_clientssl_profile)
+        addObjToTenant(f5_clientssl_profile)
 
     # Now ServerSSL Profile, if it has one.
     if serverSideSSLProfileRef != "":
@@ -992,7 +1046,23 @@ def avi2bigip_virtual(virtual):
                 log_error("ERROR: serverssl profile: " + serverSideSSLProfileRef + " not able to be converted to bigip object " + str(e))
         
         f5_virtual.profilesServerSide.append(f"/{f5_serverssl_profile.partition}/{f5_serverssl_profile.name}")
-        profiles.append(f5_serverssl_profile)
+        addObjToTenant(f5_serverssl_profile)
+        
+    # Now Persistence Profile, if it has one.
+    if persistenceProfileRef != "":
+        log_debug(f"Virtual: {virtual.name} has persistenceProfileRef: {persistenceProfileRef}")
+        try:
+            f5_persistence_profile = avi2bigip_persistence_profile(getObjByRef(persistenceProfileRef))
+        except Exception as e:
+            if args.debug:
+                log_error("ERROR: persistence profile: " + persistenceProfileRef + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
+            else:
+                log_error("ERROR: persistence profile: " + persistenceProfileRef + " not able to be converted to bigip object " + str(e))
+        
+        f5_virtual.persistenceProfile.append(f"/{f5_persistence_profile.partition}/{f5_persistence_profile.name}")
+        addObjToTenant(f5_persistence_profile)
+        
+        
     
     # Now Handle SNI Parent Virtual and all children virtuals, SSL Profiles, and Content Switching
     if sniParent:
@@ -1006,7 +1076,7 @@ def avi2bigip_virtual(virtual):
                 log_error("ERROR: clientssl profile: " + virtual.ssl_profile_ref + " " + virtual.ssl_key_and_certificate_refs[0] + " not able to be converted to bigip object " + str(e))
         # Do not append the parent profile to the Virtual Server, as it's just a parent for the child profiles, but do append it to the profiles list.
         parentClientSSLProfileName = f"/{f5_clientssl_parent_profile.partition}/{f5_clientssl_parent_profile.name}"
-        profiles.append(f5_clientssl_parent_profile)
+        addObjToTenant(f5_clientssl_parent_profile)
         defaultClientSSLProfile = f5_objects.ClientSSLProfile( f"{virtual.name}_sni_default_clientssl" )
         defaultClientSSLProfile.parent = parentClientSSLProfileName
         defaultClientSSLProfile.partition = f5_clientssl_parent_profile.partition
@@ -1014,7 +1084,7 @@ def avi2bigip_virtual(virtual):
         defaultClientSSLProfile.options = []
         defaultClientSSLProfile.ciphers = []
         defaultClientSSLProfile.sniDefault = True
-        profiles.append(defaultClientSSLProfile)
+        addObjToTenant(defaultClientSSLProfile)
         f5_virtual.profilesClientSide.append(f"/{defaultClientSSLProfile.partition}/{defaultClientSSLProfile.name}")
         # Now we need to create a default SNI ClientSSL profiel that does get appended to the Virtual.
         sniPoolMap = { }
@@ -1030,12 +1100,12 @@ def avi2bigip_virtual(virtual):
             f5_clientssl_child_profile.partition = f5_clientssl_parent_profile.partition
             f5_clientssl_child_profile.sniDefault = False
             f5_clientssl_child_profile.sniRequired = True
-            profiles.append(f5_clientssl_child_profile)
+            addObjToTenant(f5_clientssl_child_profile)
             if f"/{f5_clientssl_child_profile.partition}/{f5_clientssl_child_profile.name}" not in f5_virtual.profilesClientSide:
                 f5_virtual.profilesClientSide.append(f"/{f5_clientssl_child_profile.partition}/{f5_clientssl_child_profile.name}")
                 
             try:
-                f5_child_virtuals, f5_child_profiles = avi2bigip_virtual(childVirtual)
+                f5_child_virtuals = avi2bigip_virtual(childVirtual)
             except TypeError as e:
                 log_warning("virtual: subvirtual" + virtual.name + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
                 continue
@@ -1048,9 +1118,9 @@ def avi2bigip_virtual(virtual):
             # First we need to add this and any other virtual host domains to a SNI Mapping of hostname => pool_ref
             for hostname in childVirtual.vh_domain_name:
                 sniPoolMap[hostname] = f5_child_virtuals[0].default_pool
-                # Add to our VIP handled counter:
-                global f5VipCount
-                f5VipCount += 1
+                
+            # Add to our Virtual Service handled counter:
+            f5VirtualServiceHandledCount += 1
 
             
         # Create LTM Policy to reference Pools in Pool List... plus make sure those pools get added to the config
@@ -1063,6 +1133,8 @@ def avi2bigip_virtual(virtual):
         rd = ip.split("%")[1]
         ip = ip.split("%")[0]
         for port in destPortList:
+            if not sniChild:
+                aviVipAddrCount += 1
             if len(destPortList) > 1 and len(destIpList) > 1:
                 newDestVirtual = copy.deepcopy(f5_virtual)
                 log_debug(f"VsVip: {virtual.vsvip_ref} MULTIPLE DESTINATIONS MULTIPLE PORTS building VIP for: {ip}:{port}" )
@@ -1084,7 +1156,8 @@ def avi2bigip_virtual(virtual):
             else:
                 log_debug(f"VsVip: {virtual.name} SINGLE DESTINATION SINGLE PORT building VIP for: {ip}:{port}" )
                 virtuals.append(f5_virtual)
-        if createRedirectVips:
+        if createRedirectVips and not sniChild:
+            aviVipAddrCount += 1
             # Check to see if we already have a VIP on port 80 first..
             if "80" in destPortList or 80 in destPortList:
                 log_error(f"Virtual: {f5_virtual.name} has multiple destinations and port 80 already exists, can't create redirect VIP.")
@@ -1094,7 +1167,7 @@ def avi2bigip_virtual(virtual):
                 redirectVipFound += 1
                 virtuals.append(f5_redirect_virtual)
         
-    return virtuals, profiles
+    return virtuals
 
 
 def loadJsonFile(filename) -> SimpleNamespace:
@@ -1251,11 +1324,20 @@ def main() -> int:
                 datefmt='%Y-%m-%d %H:%M:%S'
             )
 
-    global aviVipCount
-    aviVipCount = 0
+    global aviVirtualServiceCount
+    aviVirtualServiceCount = 0
+    
+    global aviVipAddrCount
+    aviVipAddrCount = 0
     
     global f5VipCount
     f5VipCount = 0
+    
+    global redirectVipFound
+    redirectVipFound = 0
+    
+    global f5VirtualServiceHandledCount
+    f5VirtualServiceHandledCount = 0
 
     global avi_tenants
     avi_tenants = []
@@ -1298,9 +1380,9 @@ def main() -> int:
             continue
         if args.aviVirtual != "all" and virtual.name != args.aviVirtual:
             continue
-        aviVipCount += 1
+        aviVirtualServiceCount += 1
         try:
-            virtuals, profiles = avi2bigip_virtual(virtual)
+            virtuals = avi2bigip_virtual(virtual)
         except TypeError as e:
             log_debug("virtual: " + virtual.name + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
             continue
@@ -1310,53 +1392,30 @@ def main() -> int:
             else:
                 log_error("virtual: " + virtual.name + " not able to be converted to bigip object " + str(e) )
             continue
-        addedToTenant = 0
-       
-        # Because we create a F5 virtual for every destination/port add to the avi count
-        # for each additional virtual we get back beyond the 1 expected. 
-        if len(virtuals) > 1:
-            aviVipCount += len(virtuals) - 1
 
+        addedToTenant = 0
+        redirectVip = False
+        
         # we get one vip back, and we know what partition it goes in, so simply add it...
         for tenant in avi_tenants:
             if tenant.name == tenantName:
                 for f5_virtual in virtuals:
                     # Skip if it's a child virtual with dummy address:
                     if "255.255.255.255%0" in f5_virtual.destination:
+                        log_debug(f"dummy address found in {f5_virtual.name}, this must be a dummy child virtual, not adding to any tenant." )
+                        redirectVip = True
                         continue
                     f5VipCount += 1
                     tenant.f5_virtuals.append(f5_virtual)
+                    # Add to our Virtual Service handled counter:
+                    f5VirtualServiceHandledCount += 1
                     addedToTenant += 1
-
-        # we get multiple profiles back, and need to add them to the correct tenant/partition.
-        for profile in profiles:
-            #log_debug(f"TESTING Profile: {profile.name} with Partition: {profile.partition} against tenant: {tenant.name}")
-            profileAddedToTenant = 0
-            for tenant in avi_tenants:
-                if tenant.name == "admin":
-                    tenant.name = "Common"
-                if tenant.name == profile.partition:
-                    log_debug(f"Adding Profile: {profile.name} {profile.type} to tenant: {tenant.name}")
-                    profileExists = 0
-                    # Check if the profile alread exists in the tenant...
-                    for testProfile in tenant.f5_profiles:
-                        if testProfile.name == profile.name:
-                            profileExists = 1
-                            profileAddedToTenant += 1
-                    # if not add it...
-                    if profileExists == 0:
-                        tenant.f5_profiles.append(profile)
-                        profileAddedToTenant += 1
-            if profileAddedToTenant == 0:
-                log_error("Profile: " + profile.name + " not added to any tenant, no tenant found for: " + profile.partition)
-                profileAddedToTenant = 0
-
-        if addedToTenant == 0:
+        
+        if addedToTenant == 0 and not redirectVip:
             log_error("Virtual: " + virtual.name + " not added to any tenant, no tenant found for: " + tenant.name)
-            addedToTenant = 0
-    
+
         #cleanup vars:
-        del tenantName, addedToTenant, virtuals, profiles
+        del tenantName, addedToTenant, virtuals
     
     #print("Avi Tenants:")
     #pprintpp.pprint(avi_tenants)
@@ -1376,8 +1435,11 @@ def main() -> int:
     print("###############")
     print("### SUMMARY ###")
     print("###############")
-    print(f"Found Avi Vip Count: {aviVipCount}")
-    print(f"Created F5 Vip Count: {f5VipCount}")
+    print(f"Found Avi Virtual Service Count: {aviVirtualServiceCount}")
+    print(f"Found Avi VIP Address & Port Count: {aviVipAddrCount}")
+    print(f"Redirect VIPs Found: {redirectVipFound}")
+    print(f"Created F5 Virtual Count: {f5VipCount}")
+    print(f"Created F5 Virtual Services Handled Count: {f5VirtualServiceHandledCount}")
 
     return 0
 

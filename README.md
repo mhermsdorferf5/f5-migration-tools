@@ -12,7 +12,7 @@ This repo is intended to contain migraiton scripts for various system to BIG-IP.
 
 Most of these tools are written in python and have dependencies on packages often not included in the system python.  You can either install these as system packages, or you can create a python virtual environment and use pip to install them within the virtual environment.
 
-The following instructions create a python venv in the directory 
+Python Virtual Environment Instructions:
 
 ```bash
 # Create Python virtual environment in ./python-venv
@@ -23,6 +23,8 @@ source ./.python-venv/bin/activate
 python3 -m pip install --upgrade pip
 # Install required packages/libs:
 python3 -m pip install argparse logging requests
+# You're now ready to run tools using:
+python3 avi2bigip.py
 ```
 
 ## Avi Migration Tool
@@ -62,13 +64,13 @@ This was built with configruation exported from a version 22.1.6 controller.  No
 
 | Short Option | Long Option | Description |
 | -h | --help | Prints application help seen below |
-| -c <aviCloud> | --avi-cloud <aviCloud> | Limits the conversion to the cloud specified, by default this is "VM-Default-Cloud" |
-| -t <aviTenant> | --avi-tenant <aviTenant> | Limits the conversion the tenant specified, by default it converts all tenants |
-| -v <aviVirtualService> | --avi-vip <aviVirtualServiceName> | Limits the conversion to that specific Virtual Service |
-| -b <output-config> | --bigip-conf <output-config> | Filename to save the generated BIG-IP configuration to, by default avi_bigip_for_merge.conf |
-| -m <migration-config> | --migration-conf <migration-config> | Filename to read migration configuration from, required for Route Domain Mapping |
-| -s <ssl-directory> | --ssl-file-dir <ssl-directory> | Directory where we should dump the SSL certs/keys and import script, by default it's the current workign directory |
-| -f <log-filename> | --log-file <log-filename> | Filename to save logs to, by default avi_bigip_for_merge.log |
+| -c \<aviCloud> | --avi-cloud \<aviCloud> | Limits the conversion to the cloud specified, by default this is "VM-Default-Cloud" |
+| -t \<aviTenant> | --avi-tenant \<aviTenant> | Limits the conversion the tenant specified, by default it converts all tenants |
+| -v \<aviVirtualService> | --avi-vip \<aviVirtualServiceName> | Limits the conversion to that specific Virtual Service |
+| -b \<output-config> | --bigip-conf \<output-config> | Filename to save the generated BIG-IP configuration to, by default avi_bigip_for_merge.conf |
+| -m \<migration-config> | --migration-conf \<migration-config> | Filename to read migration configuration from, required for Route Domain Mapping |
+| -s \<ssl-directory> | --ssl-file-dir \<ssl-directory> | Directory where we should dump the SSL certs/keys and import script, by default it's the current workign directory |
+| -f \<log-filename> | --log-file \<log-filename> | Filename to save logs to, by default avi_bigip_for_merge.log |
 | -l | --log | Enable writing a log file in addition to writing logs to standard error/standard out. |
 | -d | --debug | Enable debug logging |
 
