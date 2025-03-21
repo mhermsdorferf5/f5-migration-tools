@@ -37,7 +37,7 @@ This was built with configruation exported from a version 22.1.6 controller.  No
   * VS_TYPE_NORMAL is currently supported
   * VS_TYPE_PARENT & VS_TYPE_CHILD is supported for SNI parent/child handling only.
   * Only HTTP and L4 type VIPs currently supported.
-  * Network Security Policies are not fully supported.
+  * Network Security Policies are not supported, but complex rules may require intervention.
   * Analytics Profiles are not supported.
   * HTTP Policies are not supported (no content switching)
 * HTTP Profiles:
@@ -47,7 +47,7 @@ This was built with configruation exported from a version 22.1.6 controller.  No
     * If XFF replacement is required, we'll need an LTM Policy or iRule to get that functionality.
   * xff_alternate_name: not fully supported, F5's HTTP Profiles only handle inserting xff headers with the industry standard name: X-Forwarded-For.
     * If custom XFF header names are required, that can be done via iRule or LTM Policies.
-  * HTTP MultiPlexing: OneConnect needs to be added to support this.
+  * HTTP MultiPlexing: OneConnect needs to be added to support this, and is done by the script unless multiplexing is disabled.
 * Client mTLS isn't currently supported.
 * Pools:
   * Pool Groups with differing server-side TLS are not supported.
@@ -71,13 +71,14 @@ This was built with configruation exported from a version 22.1.6 controller.  No
 | -m \<migration-config> | --migration-conf \<migration-config> | Filename to read migration configuration from, required for Route Domain Mapping |
 | -s \<ssl-directory> | --ssl-file-dir \<ssl-directory> | Directory where we should dump the SSL certs/keys and import script, by default it's the current workign directory |
 | -f \<log-filename> | --log-file \<log-filename> | Filename to save logs to, by default avi_bigip_for_merge.log |
+| -p | --per-tenant | Enables writing a bigip.conf file per tenant, as opposed to one large bigip.conf file |
 | -l | --log | Enable writing a log file in addition to writing logs to standard error/standard out. |
 | -d | --debug | Enable debug logging |
 
 ```bash
-$ python3 avi2bigip.py --help
-usage: avi2bigip.py [-h] [-c AVICLOUD] [-t AVITENANT] [-v AVIVIRTUAL] [-b BIGIPCONFIGFILE] [-m MIGRATIONCONFIGFILE] [-s SSLFILEDIR] [-f LOGFILE]
-                    [-l | --log | --no-log] [-d | --debug | --no-debug]
+$ python3 avi2bigip.py -h
+usage: avi2bigip.py [-h] [-c AVICLOUD] [-t AVITENANT] [-v AVIVIRTUAL] [-b BIGIPCONFIGFILE] [-m MIGRATIONCONFIGFILE] [-s SSLFILEDIR] [-f LOGFILE] [-p | --per-tenant | --no-per-tenant] [-l | --log | --no-log]
+                    [-d | --debug | --no-debug]
                     aviJsonFile
 
 Convert Avi JSON Configuration to BIG-IP Configuration
@@ -101,6 +102,8 @@ options:
                         File Directory to dump SSL certs/keys into, by default it uses the current directory.
   -f LOGFILE, --log-file LOGFILE
                         Log Path/Filename, avi_bigip_for_merge.log by default
+  -p, --per-tenant, --no-per-tenant
+                        write config to bigip.conf file per tenant.
   -l, --log, --no-log   Log to file in addition to stderr
   -d, --debug, --no-debug
                         debug logging
@@ -161,7 +164,7 @@ A configuration file is required to map Avi VRFs to F5 Route Domain IDs, additio
 ### Usage Example
 
 ```bash
-$ python3 avi2bigip.py -l avi-config-unencrypted.json 2>&1 2>&1
+$ python3 avi2bigip.py -l avi-config-unencrypted.json 2>&1
 ###############
 ### SUMMARY ###
 ###############

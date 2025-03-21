@@ -348,17 +348,29 @@ def avi2bigip_addressList(aviIPAddrGroup):
 
     f5_addressList = f5_objects.addressList(aviIPAddrGroup.name) 
     f5_addressList.partition = tenantName
-   
+    addedEntries = 0
     if hasattr(aviIPAddrGroup, 'prefixes'):
         for addr in aviIPAddrGroup.prefixes:
             f5_addressList.addresses.append(f"{addr.ip_addr.addr}/{addr.mask}")
+            addedEntries += 1
+            
+    if hasattr(aviIPAddrGroup, 'addrs'):
+        for addr in aviIPAddrGroup.addrs:
+            f5_addressList.addresses.append(f"{addr.addr}/32")
+            addedEntries += 1
         
     if hasattr(aviIPAddrGroup, 'country_codes'):
         for countryCode in aviIPAddrGroup.country_codes:
-            f5_addressList.geos.append(f"countryCode")
+            f5_addressList.geos.append(f"{countryCode}")
+            addedEntries += 1
         
     if tenantName == "admin":
         f5_addressList.partition = "Common"
+    
+    if addedEntries == 0:
+        log_error(f"Address List: {aviIPAddrGroup.name} BIG-IP Address List can't have zero entries.")
+        raise Exception(f"Address List: {aviIPAddrGroup.name} BIG-IP Address List can't have zero entries.")
+    
     return f5_addressList
 
 def avi2bigip_firewall_policy(aviNetworkSecurityPolicy):
@@ -379,34 +391,61 @@ def avi2bigip_firewall_policy(aviNetworkSecurityPolicy):
     # if ther are no rules, return the empty policy.
         
     rulesHandled = 0
-    aviRuleCount = len(aviNetworkSecurityPolicy.rules)
     for rule in aviNetworkSecurityPolicy.rules:
+        f5_ruleName = f5_objects.f5_sanitize(rule.name)
+        if rule.enable:
+            status = "enabled"
+        else:
+            status = "disabled"
         if hasattr(rule, 'match'):
             # only support client_ip today:
             if hasattr(rule.match, 'client_ip'):
                 if rule.match.client_ip.match_criteria == "IS_NOT_IN" and rule.action == "NETWORK_SECURITY_POLICY_ACTION_TYPE_DENY":
+                    # Accept this but add a default deny.
+                    action = "accept"
                     if defaultDeny:
                         log_warning(f"Network Security Policy: {aviNetworkSecurityPolicy.name} Rule: {rule.name} contains multiple deny rules with match_criteria \"IS_NOT_IN\"")
                     defaultDeny = True
-                f5_addrLists = []
-                for addrGroupRef in rule.match.client_ip.group_refs:
-                    aviAddrGroup = getObjByRef(addrGroupRef)
-                    f5_addrList = avi2bigip_addressList(aviAddrGroup)
-                    f5_addrLists.append(f"/{f5_addrList.partition}/{f5_addrList.name}")
-                    addObjToTenant(f5_addrList)
-                f5_addrListsStr = ""
-                for addrListStr in f5_addrLists:
-                    f5_addrListsStr += f"\n\t\t\t\t\t{addrListStr}"
-                f5_firewallPolicy.rules.append(f"""
-        {rule.name} {{
-            action accept
-            ip-protocol any
-            source {{
-                address-lists {{ {f5_addrListsStr}
-                }}
-            }}
-        }}""")
-                rulesHandled += 1
+                elif rule.match.client_ip.match_criteria == "IS_IN" and rule.action == "NETWORK_SECURITY_POLICY_ACTION_TYPE_DENY":
+                    action = "reject"
+                elif rule.match.client_ip.match_criteria == "IS_IN" and rule.action == "NETWORK_SECURITY_POLICY_ACTION_TYPE_ALLOW":
+                    action = "accept"
+                elif rule.match.client_ip.match_criteria == "IS_NOT_IN" and rule.action == "NETWORK_SECURITY_POLICY_ACTION_TYPE_ALLOW":
+                    action = "reject"
+                else:
+                    action = "reject"
+                    log_warning(f"Network Security Policy: {aviNetworkSecurityPolicy.name} Rule: {rule.name} does not match any accept/reject criteria, setting reject by default")
+                   
+                if hasattr(rule.match.client_ip, 'group_refs'):
+                    f5_addrLists = []
+                    for addrGroupRef in rule.match.client_ip.group_refs:
+                        aviAddrGroup = getObjByRef(addrGroupRef)
+                        try:
+                            f5_addrList = avi2bigip_addressList(aviAddrGroup)
+                        except Exception as e:
+                            if args.debug:
+                                log_error(f"Avi Address Group: Can't convert: {addrGroupRef} {str(e)} full stack: {str(traceback.format_exc())}")
+                            else:
+                                log_error(f"Avi Address Group: Can't convert: {addrGroupRef} {str(e)}")
+                        f5_addrLists.append(f"/{f5_addrList.partition}/{f5_addrList.name}")
+                        addObjToTenant(f5_addrList)
+                    f5_addrListsStr = ""
+                    for addrListStr in f5_addrLists:
+                        f5_addrListsStr += f"\n\t\t\t\t\t{addrListStr}"
+                    f5_firewallPolicy.rules.append(f"""\t\t{f5_ruleName} {{\n\t\t\taction {action}\n\t\t\tstatus {status}\n\t\t\tip-protocol any\n\t\t\tsource {{\n\t\t\t\taddress-lists {{ {f5_addrListsStr}\n\t\t\t\t}}\n\t\t\t}}\n\t\t}}""")
+                    rulesHandled += 1
+                if hasattr(rule.match.client_ip, 'addrs'):
+                    f5_addrStr = ""
+                    for addr in rule.match.client_ip.addrs:
+                        f5_addrStr += f"\n\t\t\t\t\t{addr.addr}"
+                    f5_firewallPolicy.rules.append(f"""\t\t{f5_ruleName} {{\n\t\t\taction {action}\n\t\t\tstatus {status}\n\t\t\tip-protocol any\n\t\t\tsource {{\n\t\t\t\taddresses {{ {f5_addrStr}\n\t\t\t\t}}\n\t\t\t}}\n\t\t}}""")
+                    rulesHandled += 1
+                if hasattr(rule.match.client_ip, 'prefixes'):
+                    f5_addrStr = ""
+                    for prefix in rule.match.client_ip.prefixes:
+                        f5_addrStr += f"\n\t\t\t\t\t{prefix.ip_addr.addr}/{prefix.mask}"
+                    f5_firewallPolicy.rules.append(f"""\t\t{f5_ruleName} {{\n\t\t\taction {action}\n\t\t\tstatus {status}\n\t\t\tip-protocol any\n\t\t\tsource {{\n\t\t\t\taddresses {{ {f5_addrStr}\n\t\t\t\t}}\n\t\t\t}}\n\t\t}}""")
+                    rulesHandled += 1
     
     if defaultDeny:
         f5_firewallPolicy.rules.append("""
@@ -418,8 +457,8 @@ def avi2bigip_firewall_policy(aviNetworkSecurityPolicy):
     if tenantName == "admin":
         f5_firewallPolicy.partition = "Common"
     
-    if rulesHandled != aviRuleCount:
-        log_warning(f"Network Security Policy: {aviNetworkSecurityPolicy.name} contains {aviRuleCount} but only {rulesHandled} converted to BIG-IP.")
+    if rulesHandled != len(aviNetworkSecurityPolicy.rules):
+        log_warning(f"Network Security Policy: {aviNetworkSecurityPolicy.name} contains {len(aviNetworkSecurityPolicy.rules)} but only {rulesHandled} converted to BIG-IP.")
         
     return f5_firewallPolicy
 
@@ -1304,9 +1343,16 @@ def loadJsonFile(filename) -> SimpleNamespace:
     return jsonObj
 
 
-def writeBigIpConfig():
+def writeBigIpConfig(tenantName):
+    if tenantName == "all":
+        filename = args.bigipConfigFile
+    else:
+        if args.bigipConfigFile.endswith(".conf"):
+            filename = f"{args.bigipConfigFile.removesuffix('.conf')}_{tenantName}.conf"
+        else:
+            filename = f"{args.bigipConfigFile}_{tenantName}"
     try:
-        f = open(args.bigipConfigFile, "w")
+        f = open(filename, "w")
     except Exception as e:
         log_error("ERROR: problem opening file for writing. " + e)
         raise Exception("ERROR: problem opening file for writing. " + str(e))
@@ -1317,6 +1363,9 @@ def writeBigIpConfig():
     for routeDomain in f5_routeDomains:
         f.write(routeDomain.tmos_obj() + "\n")
     for tenant in avi_tenants:
+        if tenantName != "all":
+            if tenant.name != tenantName and tenant.name != "admin":
+                continue
         if tenant.name == "admin":
             tenant.name = "Common"
         # Skip Empty Tenants:
@@ -1553,11 +1602,19 @@ def main() -> int:
     #print("Avi Tenants:")
     #pprintpp.pprint(avi_tenants)
 
-    try: 
-        writeBigIpConfig()
-    except Exception as e:
-        log_error("ERROR: problem writing BigIP Config." + str(e))
-        return 1
+    if args.perTenant:
+        for tenant in avi_tenants:
+            try: 
+                writeBigIpConfig(tenant.name)
+            except Exception as e:
+                log_error("ERROR: problem writing BigIP Config." + str(e))
+                return 1
+    else:
+        try: 
+            writeBigIpConfig('all')
+        except Exception as e:
+            log_error("ERROR: problem writing BigIP Config." + str(e))
+            return 1
 
     try: 
         writeSslFiles()
@@ -1591,6 +1648,7 @@ if __name__ == '__main__':
     parser.add_argument("-m", "--migration-conf", action="store", dest="migrationConfigFile", default="config.json", help="Configuration File for Migration, config.json by default")
     parser.add_argument("-s", "--ssl-file-dir", action="store", dest="sslFileDir", default="", help="File Directory to dump SSL certs/keys into, by default it uses the current directory.")
     parser.add_argument("-f", "--log-file", action="store", dest="logFile", default="avi_bigip_for_merge.log", help="Log Path/Filename, avi_bigip_for_merge.log by default")
+    parser.add_argument("-p", "--per-tenant", action=argparse.BooleanOptionalAction, dest="perTenant", default=False, help="write config to bigip.conf file per tenant.")
     parser.add_argument("-l", "--log", action=argparse.BooleanOptionalAction, dest="logToFile", default=False, help="Log to file in addition to stderr")
     parser.add_argument("-d", "--debug", action=argparse.BooleanOptionalAction, dest="debug", default=False, help="debug logging")
     global args

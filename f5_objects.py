@@ -34,6 +34,12 @@ def f5_sanitize(name):
     clean_name = name.replace("%20", "_")
     clean_name = clean_name.replace("%2A", "wildcard")
     clean_name = clean_name.replace(" ", "_")
+    clean_name = clean_name.replace("\\", "_")
+    clean_name = clean_name.replace("(", "_")
+    clean_name = clean_name.replace(")", "_")
+    # IF it's not a fully qualified path with /partition/objname, then replace any / characters
+    if not re.match('^\/[\w|\.|-]+\/[\w|\.|-]+$', clean_name):
+        clean_name = clean_name.replace("/", "_")
     #clean_name = clean_name.replace("-", "_")
     if clean_name in bannedObjNames:
         return "object_" + clean_name
@@ -90,7 +96,7 @@ class addressList(bigip_obj):
         else:
             addressStr = "none"
         if len(self.geos) > 0:
-            geoStr = "{}"
+            geoStr = "{"
             for geo in self.geos:
                 geoStr += f"\n\t\t{geo} {{ }}"
             geoStr += "\n\t}"
@@ -131,7 +137,7 @@ class firewallPolicy(bigip_obj):
     def tmos_obj(self):
         rulesStr = ""
         for rule in self.rules:
-            rulesStr += f"{rule}"
+            rulesStr += f"\n{rule}"
         return f"""security firewall policy /{self.partition}/{self.name} {{
     rules {{ {rulesStr}
     }}
