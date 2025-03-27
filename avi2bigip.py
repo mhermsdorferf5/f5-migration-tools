@@ -75,6 +75,7 @@ class avi_tenant:
         self.f5_apps = []
         self.f5_profiles = []
         self.f5_policies = []
+        self.f5_irules = []
         self.f5_addrLists = []
         self.f5_afmRuleSets = []
         self.f5_afmPolicies = []
@@ -213,6 +214,7 @@ def generateCertKeyFile(name, obj, type):
 def addObjToTenant(obj):
     objType = obj.__class__.__name__
     tenantNameForAdd = obj.partition
+        
     log_debug(f"Attempting Adding Object: {obj.name} of type {objType} to tenant {tenantNameForAdd}")
     addedToTenant = 0
     for tenant in avi_tenants:
@@ -227,10 +229,12 @@ def addObjToTenant(obj):
                     addToList = tenant.f5_monitors
                 case "virtual":
                     addToList = tenant.f5_virtuals
+                case "virtual_address":
+                    addToList = tenant.f5_virtuals
                 case "ltmPolicy":
                     addToList = tenant.f5_policies
                 case "iRule":
-                    addToList = tenant.f5_rules
+                    addToList = tenant.f5_irules
                 case "profile" | "httpProfile" | "networkProfile" | "ClientSSLProfile" | "ServerSSLProfile" | "profilesPersistence" | "oneconnectProfile":
                     addToList = tenant.f5_profiles
                 case "addressList":
@@ -324,23 +328,100 @@ def avi2bigip_http_profile(aviApplicationProfile):
             f5_profile.redirectRewrite = "all"
 
         #For all but "ADD_NEW_XFF_HEADER" we'll need LTM Policies or iRules to fully implement.
+        # So this should be done outisde of the HTTP Profile.
         match aviApplicationProfile.http_profile.xff_update:
             case "ADD_NEW_XFF_HEADER":
                 f5_profile.insertXForwardedFor = "enabled"
             case "APPEND_TO_THE_XFF_HEADER":
                 f5_profile.insertXForwardedFor = "enabled"
-                log_warning("HTTP Profile: " + aviApplicationProfile.name + " Don't know how to handle xff_update = APPEND_TO_THE_XFF_HEADER.")
             case "REPLACE_XFF_HEADERS":
                 f5_profile.insertXForwardedFor = "enabled"
-                log_warning("HTTP Profile: " + aviApplicationProfile.name + " Don't know how to handle xff_update = REPLACE_XFF_HEADERS.")
-        if aviApplicationProfile.http_profile.xff_alternate_name != "X-Forwarded-For":
-            log_warning("HTTP Profile: " + aviApplicationProfile.name + " Don't know how to handle xff_alternative_name.")
         if aviApplicationProfile.http_profile.ssl_client_certificate_mode != "SSL_CLIENT_CERTIFICATE_NONE":
             log_warning("HTTP Profile: " + aviApplicationProfile.name + " Don't know how to handle Client Cert Auth.")
 
     if tenantName == "admin":
         f5_profile.partition = "Common"
     return f5_profile
+
+def avi2bigip_httpPolicySet(aviHttpPolicySet):
+    policyName =  f5_objects.f5_sanitize(aviHttpPolicySet.name)
+    tenantName =  f5_objects.f5_sanitize(getRefName(aviHttpPolicySet.tenant_ref))
+    irules = []
+    handledPolicyRules = 0
+    foundPolicyRules = 0
+    if hasattr(aviHttpPolicySet, 'http_request_policy'):
+        for rule in aviHttpPolicySet.http_request_policy.rules:
+            log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name}" )
+            if rule.enable:
+                foundPolicyRules += 1
+                ruleName = rule.name
+                redirectAction = ""
+                conditional = ""
+                if hasattr(rule, 'match'):
+                    if hasattr(rule.match, 'vs_port'):
+                        if rule.match.vs_port.match_criteria == "IS_IN":
+                            conditional = f"[TCP::local_port clientside] == {rule.match.vs_port.ports[0]}"
+                            if len(rule.match.vs_port.ports) > 1:
+                                for port in rule.match.vs_port.ports:
+                                    conditional += f" || [TCP::local_port clientside] == {port}"
+                        elif rule.match.vs_port.match_criteria == "IS_NOT_IN":
+                            conditional = f"[TCP::local_port clientside] != {rule.match.vs_port.ports[0]}"
+                            if len(rule.match.vs_port.ports) > 1:
+                                for port in rule.match.vs_port.ports:
+                                    conditional += f" || [TCP::local_port clientside] != {port}"
+                        else:
+                            log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name} has vs_port conditional but no IS_IN or IS_NOT_IN criteria" )
+                            
+                    log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has match, set the following conditional: {conditional}")
+                            
+                if hasattr(rule, 'redirect_action'):
+                    if hasattr(rule.redirect_action, 'host') or hasattr(rule.redirect_action, 'path'):
+                        conditional = ""
+                        log_warning(f"HTTPPolicySet: {aviHttpPolicySet.name} has redirect action, with host/path properties, skipping.")
+                    else:
+                        if rule.redirect_action.status_code == "HTTP_REDIRECT_STATUS_CODE_301":
+                            if rule.redirect_action.keep_query:
+                                redirectAction = f"HTTP::respond 301 Location {rule.redirect_action.protocol.lower()}://[getfield [HTTP::host] \":\" 1]:{rule.redirect_action.port}[HTTP::uri]"
+                            else:
+                                redirectAction = f"HTTP::respond 301 Location {rule.redirect_action.protocol.lower()}://[getfield [HTTP::host] \":\" 1]:{rule.redirect_action.port}[HTTP::path]"
+                        if rule.redirect_action.status_code == "HTTP_REDIRECT_STATUS_CODE_302":
+                            if rule.redirect_action.keep_query:
+                                redirectAction = f"HTTP::redirect {rule.redirect_action.protocol.lower()}://[getfield [HTTP::host] \":\" 1]:{rule.redirect_action.port}[HTTP::uri]"
+                            else:
+                                redirectAction = f"HTTP::redirect {rule.redirect_action.protocol.lower()}://[getfield [HTTP::host] \":\" 1]:{rule.redirect_action.port}[HTTP::path]"
+                    
+                    log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has redirect action, set the following conditional: {redirectAction}")
+                            
+                log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} conditional: {conditional} redirectAction: {redirectAction}")
+                if conditional != "" and redirectAction != "":
+                    irule = f5_objects.iRule(f"{policyName}_{ruleName}_redirect_irule")
+                    if tenantName != "admin":
+                        irule.partition = f5_objects.f5_sanitize(tenantName)
+                    priority = 200 + rule.index
+                    irule.iRule = f"""
+\twhen HTTP_REQUEST priority {priority} {{
+\t\tif {{ {conditional} }} {{
+\t\t\t{redirectAction}
+\t\t}}
+\t}}
+"""
+                    handledPolicyRules += 1
+                    irules.append(irule)
+                    
+            
+    if hasattr(aviHttpPolicySet, 'http_response_policy'):
+        for rule in aviHttpPolicySet.http_response_policy.rules:
+            foundPolicyRules += 1
+            log_debug(f"HTTPPolicySet: {policyName} has httpPolicySet with http_request_policy rule: {rule}" )
+            
+            
+    if foundPolicyRules == 0:
+        log_debug(f"HTTPPolicySet: {policyName} has http_policies but policy has no rules, ignoring." )
+    if foundPolicyRules > handledPolicyRules:
+        log_error(f"HTTPPolicySet: {policyName} has {foundPolicyRules} rules but only {handledPolicyRules} rules were handled." )
+        
+    return irules
+
 
 def avi2bigip_addressList(aviIPAddrGroup):
 
@@ -1087,9 +1168,29 @@ def avi2bigip_virtual(virtual):
                     else:
                         log_error("Application Profile: " + aviApplicationProfile.name + " not able to be converted to bigip object " + str(e))
 
-                if hasattr(aviApplicationProfile, 'http_profile.compression_profile'):
+                if hasattr(aviApplicationProfile.http_profile, 'compression_profile'):
                     if aviApplicationProfile.http_profile.compression_profile.compression is True:
                         log_warning("Application Profile: " + aviApplicationProfile.name + " Don't know how to handle compression." )
+
+                if hasattr(aviApplicationProfile.http_profile, 'xff_update'):
+                    #For all but "ADD_NEW_XFF_HEADER" we'll need LTM Policies or iRules to fully implement.
+                    # So this should be done outisde of the HTTP Profile.
+                    if aviApplicationProfile.http_profile.xff_update == "REPLACE_XFF_HEADERS" or aviApplicationProfile.http_profile.xff_alternate_name != "X-Forwarded-For":
+                        log_debug (f"HTTP Profile: {aviApplicationProfile.name} replace header iRule or non-standard xff_alternative_name: {aviApplicationProfile.http_profile.xff_alternate_name}.")
+                        xffHeaderName = aviApplicationProfile.http_profile.xff_alternate_name
+                        xffiRule = f5_objects.iRule(f"{xffHeaderName}_insert_irule")
+                        xffiRule.iRule = f"""
+\t# When A HTTP REQUEST is received, fire this iRule at priority 100,
+\t# so that it happens fairly early in the chain as the default priority is 500.
+\twhen HTTP_REQUEST priority 100 {{
+\t    # Note: HTTP::header replace only replaces the last instance, so remove then insert.
+\t    HTTP::header remove {xffHeaderName}
+\t    HTTP::header insert {xffHeaderName} [IP::remote_addr] 
+\t}}
+"""
+                        f5_virtual.irules.append(f"/{xffiRule.partition}/{xffiRule.name}")
+                        addObjToTenant(xffiRule)
+
 
                 if aviApplicationProfile.http_profile.http_to_https is True:
                     log_debug("Application Profile: " + aviApplicationProfile.name + " Redirecting HTTP to HTTPS.")
@@ -1109,20 +1210,43 @@ def avi2bigip_virtual(virtual):
                     oneconnectProfile = f5_objects.oneconnectProfile("avi_migrated_oneconnect")
                     addObjToTenant(oneconnectProfile)
                     f5_virtual.profilesAll.append(f"/Common/avi_migrated_oneconnect")
+                    
             case "APPLICATION_PROFILE_TYPE_L4":
                 if aviApplicationProfile.preserve_client_ip is True:
                     f5_virtual.snat = False
                     f5_virtual.snat_type = "none"
                 else:
-                    f5_virtual.snat = True
-                    f5_virtual.snat_type = "automap"
+                    if f5_network_profile.snat == "disabled":
+                        f5_virtual.snat = False
+                        f5_virtual.snat_type = "none"
+                    else:
+                        f5_virtual.snat = True
+                        f5_virtual.snat_type = "automap"
+                    
             case "APPLICATION_PROFILE_TYPE_SSL":
                 if aviApplicationProfile.preserve_client_ip is True:
                     f5_virtual.snat = False
                     f5_virtual.snat_type = "none"
                 else:
-                    f5_virtual.snat = True
-                    f5_virtual.snat_type = "automap"
+                    if f5_network_profile.snat == "disabled":
+                        f5_virtual.snat = False
+                        f5_virtual.snat_type = "none"
+                    else:
+                        f5_virtual.snat = True
+                        f5_virtual.snat_type = "automap"
+                    
+            case "APPLICATION_PROFILE_TYPE_SYSLOG":
+                if aviApplicationProfile.preserve_client_ip is True:
+                    f5_virtual.snat = False
+                    f5_virtual.snat_type = "none"
+                else:
+                    if f5_network_profile.snat == "disabled":
+                        f5_virtual.snat = False
+                        f5_virtual.snat_type = "none"
+                    else:
+                        f5_virtual.snat = True
+                        f5_virtual.snat_type = "automap"
+                    
             case _:
                 log_warning("Application Profile: " + aviApplicationProfile.name + " Don't know how to handle type: " + aviApplicationProfile.type)
     
@@ -1143,27 +1267,19 @@ def avi2bigip_virtual(virtual):
             
         
     if hasattr(virtual, 'http_policies'):
-        foundPolicyRules = 0
+        httpPolicyiRules = []
         for httpPolicy in virtual.http_policies:
             try:
-                httpPolicy = getObjByRef(httpPolicy.http_policy_set_ref)
+                httpPolicyiRules = avi2bigip_httpPolicySet(getObjByRef(httpPolicy.http_policy_set_ref))
             except Exception as e:
                 if args.debug:
-                    log_error("HTTP Policy: Can't find policy: " + httpPolicy.http_policy_set_ref + str(e) + " full stack: " + str(traceback.format_exc()))
+                    log_error("HTTPPolicySet: Can't find/migrate: " + httpPolicy.http_policy_set_ref + str(e) + " full stack: " + str(traceback.format_exc()))
                 else:
-                    log_error("HTTP Policy: Can't find policy: " + httpPolicy.http_policy_set_ref + str(e))
-            if hasattr(httpPolicy, 'http_request_policy'):
-                for rule in httpPolicy.http_request_policy.rules:
-                    foundPolicyRules += 1
-                    log_debug(f"Virtual: {virtual.name} has httpPolicySet with http_request_policy rule: {rule}" )
-            if hasattr(httpPolicy, 'http_response_policy'):
-                for rule in httpPolicy.http_response_policy.rules:
-                    foundPolicyRules += 1
-                    log_debug(f"Virtual: {virtual.name} has httpPolicySet with http_request_policy rule: {rule}" )
-        if foundPolicyRules == 0:
-            log_debug("Virtual: " + virtual.name + " has http_policies but policy has no rules, ignoring." )
-        else:
-            log_error("Virtual: " + virtual.name + " Don't know how to handle http_policies with http policy with rules on VirtualService object." )
+                    log_error("HTTPPolicySet: Can't find/migrate: " + httpPolicy.http_policy_set_ref + str(e))
+        
+        for httpPolicyiRule in httpPolicyiRules:
+            f5_virtual.irules.append(f"/{httpPolicyiRule.partition}/{httpPolicyiRule.name}")
+            addObjToTenant(httpPolicyiRule)
     
 
     # Now Client SSL Profile, if it has one.
@@ -1212,6 +1328,7 @@ def avi2bigip_virtual(virtual):
         
     
     # Now Handle SNI Parent Virtual and all children virtuals, SSL Profiles, and Content Switching
+    serverSSLProfileFromChild = ""
     if sniParent and not sniChild:
         if hasattr(virtual.extension, 'vh_child_vs_uuid'):
             childrenUUIDs = virtual.extension.vh_child_vs_uuid
@@ -1272,6 +1389,19 @@ def avi2bigip_virtual(virtual):
                 log_warning("virtual: subvirtual" + virtual.name + " not able to be converted to bigip object " + str(e) + " full stack: " + str(traceback.format_exc()))
                 continue
             
+            if len(f5_child_virtuals) == 1:
+                if len(f5_child_virtuals[0].profilesServerSide) == 1:
+                    if serverSSLProfileFromChild == "":
+                        serverSSLProfileFromChild = f5_child_virtuals[0].profilesServerSide[0]
+                        log_warning(f"virtual: subvirtual {virtual.name} Child virtual: {f5_child_virtuals[0].name} has a ServerSSL Profile: {serverSSLProfileFromChild}")
+                    else:
+                        if not f5_child_virtuals[0].profilesServerSide[0] == serverSSLProfileFromChild:
+                            log_warning(f"virtual: subvirtual {virtual.name} Child virtual: {f5_child_virtuals[0].name} has a different ServerSSL Profile than other child virtuals already using: {serverSSLProfileFromChild} and discovered child with: {f5_child_virtuals[0].profilesServerSide[0]}.")
+                else:
+                    if serverSSLProfileFromChild != "":
+                        log_error(f"virtual: subvirtual {virtual.name} Child virtual: {f5_child_virtuals[0].name} has a NO ServerSSL Profile while other child virtuals already using: {serverSSLProfileFromChild} and discovered child with: {f5_child_virtuals[0].profilesServerSide[0]}.")
+                    
+            
             if len(f5_child_virtuals) == 0:
                 log_error(f"virtual: subvirtual {childVirtual.name} returned no virtuals, don't know how to handle this.")
             if len(f5_child_virtuals) > 1:
@@ -1293,11 +1423,23 @@ def avi2bigip_virtual(virtual):
         ltmPolicy = createSNIRoutingLTMPolicy(ltmPolicyName, f5_virtual.partition, sniPoolMap)
         f5_virtual.ltmPolicies.append(f"/{ltmPolicy.partition}/{ltmPolicy.name}")
         addObjToTenant(ltmPolicy)
+        if serverSSLProfileFromChild != "":
+            f5_virtual.profilesServerSide.append(serverSSLProfileFromChild)
 
     # If we have multiple destinations and/or multiple ports, copy our vip to multiple virtuals one per destination port combo.
     for ip in destIpList:
         rd = ip.split("%")[1]
         ip = ip.split("%")[0]
+        
+        if not "255.255.255.255" in ip:
+            virtualAddress = f5_objects.virtual_address(f"{ip}")
+            virtualAddress.routeDomain = rd
+            virtualAddress.partition = f5_virtual.partition
+            virtualAddress.enabled = False
+            virtualAddress.routeAdvertisement = "selective"
+            virtualAddress.trafficGroup = "none"
+            addObjToTenant(virtualAddress)
+        
         for port in destPortList:
             if not sniChild:
                 aviVipAddrCount += 1
@@ -1356,31 +1498,37 @@ def writeBigIpConfig(tenantName):
     except Exception as e:
         log_error("ERROR: problem opening file for writing. " + e)
         raise Exception("ERROR: problem opening file for writing. " + str(e))
+    if args.baseConf:
+        f.write(f"################################################################################\n")
+        f.write(f"### \t RouteDomain Config \t###\n")
+        f.write(f"################################################################################\n")
+        for routeDomain in f5_routeDomains:
+            f.write(routeDomain.tmos_obj() + "\n")
 
-    f.write(f"################################################################################\n")
-    f.write(f"### \t RouteDomain Config \t###\n")
-    f.write(f"################################################################################\n")
-    for routeDomain in f5_routeDomains:
-        f.write(routeDomain.tmos_obj() + "\n")
     for tenant in avi_tenants:
         if tenantName != "all":
             if tenant.name != tenantName and tenant.name != "admin":
                 continue
         if tenant.name == "admin":
             tenant.name = "Common"
+            
         # Skip Empty Tenants:
-        if tenant.name != "Common":
-            if len(tenant.f5_virtuals) < 1:
-                log_warning(f"Tenant: {tenant.name} has no Virtual Servers.")
-                #f.write(f"# Tenant: {tenant.name} has no Virtual Servers skipping all objects.\n")
-                continue
+        if tenant.name != "Common" and len(tenant.f5_virtuals) < 1:
+            log_debug(f"Tenant: {tenant.name} has no Virtual Servers.")
+            #f.write(f"# Tenant: {tenant.name} has no Virtual Servers skipping all objects.\n")
+            continue
+        # Skip Common
+        if tenant.name == "Common" and args.commonConf:
+            continue
+        
         f.write(f"################################################################################\n")
         f.write(f"### Tenant: {tenant.name}\t###\n")
         f.write(f"################################################################################\n")
-        if tenant.name != "Common":
-            for partition in f5_partitions:
-                if partition.name == tenant.name:
-                    f.write(partition.tmos_obj() + "\n")
+        if args.baseConf:
+            if tenant.name != "Common":
+                for partition in f5_partitions:
+                    if partition.name == tenant.name:
+                        f.write(partition.tmos_obj() + "\n")
         f.write(f"### Tenant: {tenant.name}\tMonitors ###\n")
         for monitor in tenant.f5_monitors:
             f.write(monitor.tmos_obj() + "\n")
@@ -1399,10 +1547,35 @@ def writeBigIpConfig(tenantName):
         f.write(f"### Tenant: {tenant.name}\tAFM Policies###\n")
         for policy in tenant.f5_afmPolicies:
             f.write(policy.tmos_obj() + "\n")
+        f.write(f"### Tenant: {tenant.name}\tiRules ###\n")
+        for irule in tenant.f5_irules:
+            f.write(irule.tmos_obj() + "\n")
         f.write(f"### Tenant: {tenant.name}\tVirtual Servers ###\n")
         for virtual in tenant.f5_virtuals:
             f.write(virtual.tmos_obj() + "\n")
+        
     f.close()
+
+    # Deal with mapping any Avi Tenants to different F5 Partition Names:
+    if len(migration_config.outputRegex) > 0:
+        try:
+            f = open(filename, "r")
+        except Exception as e:
+            log_error("ERROR: problem opening file for writing. " + e)
+            raise Exception("ERROR: problem opening file for writing. " + str(e))
+        configContents = f.read()
+        f.close()
+        updatedConfigContents = configContents
+        for regex in migration_config.outputRegex:
+            updatedConfigContents = re.sub(regex.matchRegex, regex.replacementRegex, updatedConfigContents)
+            log_debug(f"Output Regex running: s/{regex.matchRegex}/{regex.replacementRegex}/g")
+        try:
+            f = open(filename, "w")
+        except Exception as e:
+            log_error("ERROR: problem opening file for writing. " + e)
+            raise Exception("ERROR: problem opening file for writing. " + str(e))
+        f.write(updatedConfigContents)
+        f.close()
 
     return
 
@@ -1531,15 +1704,17 @@ def main() -> int:
     f5_routeDomains = []
 
     for tenant in avi_config.Tenant:
-        f5_partition = f5_objects.partition(tenant.name)
-        avi_tenant_obj   = avi_tenant(tenant.name)
-        if tenant.name == "admin":
+        # Deal with mapping any Avi Tenants to different F5 Partition Names:
+        tenantName = tenant.name
+        f5_partition = f5_objects.partition(tenantName)
+        avi_tenant_obj   = avi_tenant(tenantName)
+        if tenantName == "admin":
             avi_tenant_obj.name = "Common"
         if hasattr(tenant, 'description'): 
             f5_partition.description = tenant.description
             avi_tenant_obj.description = tenant.description
-        for partition in migration_config.partitionDefaultRoutDomain:
-            if tenant.name == partition.partitionName:
+        for partition in migration_config.routeDomainMapping:
+            if tenantName == partition.vrfName:
                 avi_tenant_obj.defaultRouteDomain = partition.rdID
                 f5_partition.defaultRouteDomain = partition.rdID
         f5_partitions.append(f5_partition)
@@ -1560,7 +1735,7 @@ def main() -> int:
             continue
         if args.aviTenant != "all" and tenantName != args.aviTenant:
             continue
-        if args.aviVirtual != "all" and virtual.name != args.aviVirtual:
+        if args.aviVirtual != "all" and virtual.name not in args.aviVirtual:
             continue
         aviVirtualServiceCount += 1
         try:
@@ -1578,20 +1753,22 @@ def main() -> int:
         addedToTenant = 0
         redirectVip = False
         
+        
         # we get one vip back, and we know what partition it goes in, so simply add it...
-        for tenant in avi_tenants:
-            if tenant.name == tenantName:
-                for f5_virtual in virtuals:
-                    # Skip if it's a child virtual with dummy address:
-                    if "255.255.255.255%0" in f5_virtual.destination:
-                        log_debug(f"dummy address found in {f5_virtual.name}, this must be a dummy child virtual, not adding to any tenant." )
-                        redirectVip = True
-                        continue
-                    f5VipCount += 1
-                    tenant.f5_virtuals.append(f5_virtual)
-                    # Add to our Virtual Service handled counter:
-                    f5VirtualServiceHandledCount += 1
-                    addedToTenant += 1
+        #for tenant in avi_tenants:
+        #    if tenant.name == tenantName:
+        for f5_virtual in virtuals:
+            # Skip if it's a child virtual with dummy address:
+            if "255.255.255.255%0" in f5_virtual.destination:
+                log_debug(f"dummy address found in {f5_virtual.name}, this must be a dummy child virtual, not adding to any tenant." )
+                redirectVip = True
+                continue
+            f5VipCount += 1
+            #tenant.f5_virtuals.append(f5_virtual)
+            addObjToTenant(f5_virtual)
+            # Add to our Virtual Service handled counter:
+            f5VirtualServiceHandledCount += 1
+            addedToTenant += 1
         
         if addedToTenant == 0 and not redirectVip:
             log_error("Virtual: " + virtual.name + " not added to any tenant, no tenant found for: " + tenant.name)
@@ -1643,12 +1820,14 @@ if __name__ == '__main__':
     parser.add_argument("aviJsonFile", action="store", help="Avi JSON Configuration File")
     parser.add_argument("-c", "--avi-cloud", action="store", dest="aviCloud", default="VM-Default-Cloud", help="Avi Cloud to convert, by default it converts only the VM-Default-Cloud")
     parser.add_argument("-t", "--avi-tenant", action="store", dest="aviTenant", default="all", help="Avi Tenant to convert, by default it converts all tenants")
-    parser.add_argument("-v", "--avi-virtual", action="store", dest="aviVirtual", default="all", help="Avi Virtual Service to convert, by default it converts all Virtual Services")
+    parser.add_argument("-v", "--avi-virtuals", action="store", dest="aviVirtual", default="all", help="List of Avi Virtual Service to convert, by default it converts all Virtual Services")
     parser.add_argument("-b", "--bigip-conf", action="store", dest="bigipConfigFile", default="avi_bigip_for_merge.conf", help="BIG-IP Configuration File destination, avi_bigip_for_merge.conf by default")
     parser.add_argument("-m", "--migration-conf", action="store", dest="migrationConfigFile", default="config.json", help="Configuration File for Migration, config.json by default")
     parser.add_argument("-s", "--ssl-file-dir", action="store", dest="sslFileDir", default="", help="File Directory to dump SSL certs/keys into, by default it uses the current directory.")
     parser.add_argument("-f", "--log-file", action="store", dest="logFile", default="avi_bigip_for_merge.log", help="Log Path/Filename, avi_bigip_for_merge.log by default")
     parser.add_argument("-p", "--per-tenant", action=argparse.BooleanOptionalAction, dest="perTenant", default=False, help="write config to bigip.conf file per tenant.")
+    parser.add_argument("--base-conf", action=argparse.BooleanOptionalAction, dest="baseConf", default=False, help="Output Base configuration items, otherwise do not output route domain and partition configs")
+    parser.add_argument("--common-conf", action=argparse.BooleanOptionalAction, dest="commonConf", default=False, help="Do Not output Common configuration items, common elements are added to the config file")
     parser.add_argument("-l", "--log", action=argparse.BooleanOptionalAction, dest="logToFile", default=False, help="Log to file in addition to stderr")
     parser.add_argument("-d", "--debug", action=argparse.BooleanOptionalAction, dest="debug", default=False, help="debug logging")
     global args

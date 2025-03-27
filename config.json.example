@@ -13,22 +13,18 @@
       "rdID": 11
     }
   ],
-  "partitionDefaultRoutDomain": [
+  "outputRegex": [
     {
-      "partitionName": "FOO",
-      "rdID": 20
+      "matchRegex": "\/FOO\/",
+      "replacementRegex": "/BAR/"
     },
     {
-      "partitionName": "BAR",
-      "rdID": 10
+      "matchRegex": "net route-domain FOO ",
+      "replacementRegex": "net route-domain BAR "
     },
     {
-      "partitionName": "FOOBAR",
-      "rdID": 11
-    },
-    {
-      "partitionName": "INTERNET",
-      "rdID": 100
+      "matchRegex": "auth partition FOO ",
+      "replacementRegex": "auth partition BAR "
     }
   ],
   "cipherStringMapping": [

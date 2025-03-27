@@ -115,6 +115,30 @@ class addressList(bigip_obj):
     fqdns {fqdnStr}
 }}"""
 
+class iRule(bigip_obj):
+    description = "iRule"
+
+    def __init__(self, name):
+        self.name = f5_sanitize(name)
+        self.partition = "Common"
+        self.iRule = ""
+
+    @property
+    def name(self):
+        return self._name
+    @name.setter
+    def name(self, value):
+        self._name = f5_sanitize(value)
+
+    def __str__(self):
+        return f"bigip_iRule(name={self.name}"
+    def __repr__(self):
+        return f"bigip_iRule(name={self.name}"
+    def tmos_obj(self):
+        return f"""ltm rule /{self.partition}/{self.name} {{
+            {self.iRule}
+}}"""
+
 class firewallPolicy(bigip_obj):
     description = "AFM Firewall Policy"
 
@@ -760,6 +784,39 @@ class pool(bigip_obj):
 }}"""
 
 
+
+class virtual_address():
+    description = "LTM Virtual Address"
+
+    def __init__(self, dest):
+        self.name = dest
+        self.dest = dest
+        self.enabled = True
+        self.partition = "Common"
+        self.routeDomain = 0
+        self.trafficGroup = "none"
+        self.routeAdvertisement = "disabled"
+        self.serverScope = "any"
+        self.mask = "255.255.255.255"
+
+    def __str__(self):
+        return f"bigip_virtual_address(name='{self.name}')"
+    def __repr__(self):
+        return f"bigip_virtual_address(name='{self.name}')"
+
+    def tmos_obj(self):
+        if self.enabled:
+            enabled = "yes"
+        else:
+            enabled = "no"
+        return f"""ltm virtual-address /{self.partition}/{self.name}%{self.routeDomain} {{
+    address {self.dest}%{self.routeDomain}
+    mask {self.mask}
+    enabled {enabled}
+    traffic-group {self.trafficGroup}
+    route-advertisement {self.routeAdvertisement}
+    server-scope {self.serverScope}
+}}"""
 
 class virtual(bigip_obj):
     description = "LTM Virtual Server"

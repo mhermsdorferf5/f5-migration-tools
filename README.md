@@ -4,9 +4,9 @@ This repo is intended to contain migraiton scripts for various system to BIG-IP.
 
 ## Contents
 
--[Installation](#installation)
--[Avi Migration Tool](#avi-migration-tool)
--[Miscellaneous Tools](#miscellaneous-tools)
+*[Installation](#installation)
+*[Avi Migration Tool](#avi-migration-tool)
+*[Miscellaneous Tools](#miscellaneous-tools)
 
 ## Installation
 
@@ -66,19 +66,22 @@ This was built with configruation exported from a version 22.1.6 controller.  No
 | -h | --help | Prints application help seen below |
 | -c \<aviCloud> | --avi-cloud \<aviCloud> | Limits the conversion to the cloud specified, by default this is "VM-Default-Cloud" |
 | -t \<aviTenant> | --avi-tenant \<aviTenant> | Limits the conversion the tenant specified, by default it converts all tenants |
-| -v \<aviVirtualService> | --avi-vip \<aviVirtualServiceName> | Limits the conversion to that specific Virtual Service |
+| -v \<aviVirtualService> | --avi-vip \<aviVirtualServiceName> | Limits the conversion to Virtual Service names that match are contained within this string. |
 | -b \<output-config> | --bigip-conf \<output-config> | Filename to save the generated BIG-IP configuration to, by default avi_bigip_for_merge.conf |
 | -m \<migration-config> | --migration-conf \<migration-config> | Filename to read migration configuration from, required for Route Domain Mapping |
 | -s \<ssl-directory> | --ssl-file-dir \<ssl-directory> | Directory where we should dump the SSL certs/keys and import script, by default it's the current workign directory |
 | -f \<log-filename> | --log-file \<log-filename> | Filename to save logs to, by default avi_bigip_for_merge.log |
 | -p | --per-tenant | Enables writing a bigip.conf file per tenant, as opposed to one large bigip.conf file |
+|  | --no-common-conf | Pevents the writing of Common configuration to the output bigip.conf file |
+|  | --no-base-conf   | Pevents the writing of Route Domain/Partition configuration to the output bigip.conf file |
+| -p | --per-tenant | Enables writing a bigip.conf file per tenant, as opposed to one large bigip.conf file |
 | -l | --log | Enable writing a log file in addition to writing logs to standard error/standard out. |
 | -d | --debug | Enable debug logging |
 
 ```bash
-$ python3 avi2bigip.py -h
-usage: avi2bigip.py [-h] [-c AVICLOUD] [-t AVITENANT] [-v AVIVIRTUAL] [-b BIGIPCONFIGFILE] [-m MIGRATIONCONFIGFILE] [-s SSLFILEDIR] [-f LOGFILE] [-p | --per-tenant | --no-per-tenant] [-l | --log | --no-log]
-                    [-d | --debug | --no-debug]
+$  python3 avi2bigip.py --help
+usage: avi2bigip.py [-h] [-c AVICLOUD] [-t AVITENANT] [-v AVIVIRTUAL] [-b BIGIPCONFIGFILE] [-m MIGRATIONCONFIGFILE] [-s SSLFILEDIR] [-f LOGFILE] [-p | --per-tenant | --no-per-tenant] [--base-conf | --no-base-conf]
+                    [--no-common-conf | --no-no-common-conf] [-l | --log | --no-log] [-d | --debug | --no-debug]
                     aviJsonFile
 
 Convert Avi JSON Configuration to BIG-IP Configuration
@@ -92,8 +95,8 @@ options:
                         Avi Cloud to convert, by default it converts only the VM-Default-Cloud
   -t AVITENANT, --avi-tenant AVITENANT
                         Avi Tenant to convert, by default it converts all tenants
-  -v AVIVIRTUAL, --avi-virtual AVIVIRTUAL
-                        Avi Virtual Service to convert, by default it converts all Virtual Services
+  -v AVIVIRTUAL, --avi-virtuals AVIVIRTUAL
+                        List of Avi Virtual Service to convert, by default it converts all Virtual Services
   -b BIGIPCONFIGFILE, --bigip-conf BIGIPCONFIGFILE
                         BIG-IP Configuration File destination, avi_bigip_for_merge.conf by default
   -m MIGRATIONCONFIGFILE, --migration-conf MIGRATIONCONFIGFILE
@@ -104,6 +107,10 @@ options:
                         Log Path/Filename, avi_bigip_for_merge.log by default
   -p, --per-tenant, --no-per-tenant
                         write config to bigip.conf file per tenant.
+  --base-conf, --no-base-conf
+                        Output Base configuration items, otherwise do not output route domain and partition configs
+  --common-conf, --no-common-conf
+                        Do Not output Common configuration items, common elements are added to the config file
   -l, --log, --no-log   Log to file in addition to stderr
   -d, --debug, --no-debug
                         debug logging
@@ -111,7 +118,7 @@ options:
 
 ### Configuration File
 
-A configuration file is required to map Avi VRFs to F5 Route Domain IDs, additionally it's very helpful for mapping default route domain IDs to F5 partitions created from Avi Tenants.  Additionally, while many TLS Cipher strings are teh came between Avi and F5, not all are.  This config can be used mapping Avi TLS cipher strings to a cipher string name supported by BIG-IP.
+A configuration file is required to map Avi VRFs to F5 Route Domain IDs, additionally this gets used for mapping default route domain IDs to F5 partitions created from Avi Tenants/VRFs.  There's also a regex substitution engine on the output file, this allows you to use regex syntax to modify various aspects of the output, such as renaming a partition, or renaming virtual servers/pools, etc.  Additionally, while many TLS Cipher strings are teh came between Avi and F5, not all are.  This config can be used mapping Avi TLS cipher strings to a cipher string name supported by BIG-IP.
 
 ```json
 {
@@ -129,22 +136,18 @@ A configuration file is required to map Avi VRFs to F5 Route Domain IDs, additio
       "rdID": 11
     }
   ],
-  "partitionDefaultRoutDomain": [
+  "outputRegex": [
     {
-      "partitionName": "FOO",
-      "rdID": 20
+      "matchRegex": "\/FOO\/",
+      "replacementRegex": "/BAR/"
     },
     {
-      "partitionName": "BAR",
-      "rdID": 10
+      "matchRegex": "net route-domain FOO ",
+      "replacementRegex": "net route-domain BAR "
     },
     {
-      "partitionName": "FOOBAR",
-      "rdID": 11
-    },
-    {
-      "partitionName": "INTERNET",
-      "rdID": 100
+      "matchRegex": "auth partition FOO ",
+      "replacementRegex": "auth partition BAR "
     }
   ],
   "cipherStringMapping": [
@@ -158,7 +161,6 @@ A configuration file is required to map Avi VRFs to F5 Route Domain IDs, additio
     }
   ]
 }
-
 ```
 
 ### Usage Example
