@@ -1013,6 +1013,15 @@ def avi2bigip_pool(pool):
 
     return f5_pool
 
+def getVirtualServicesOnVsVip(vsVipRef):
+    virtualServicesUsingVsVip = []
+    for virtual in avi_config.VirtualService:
+        if hasattr(virtual, 'vsvip_ref'):
+            if virtual.vsvip_ref == vsVipRef:
+                for vip in avi2bigip_virtual(virtual):
+                    virtualServicesUsingVsVip.append(vip)
+    return virtualServicesUsingVsVip
+    
 def avi2bigip_virtual(virtual):
     # Global Counters....
     global aviVipAddrCount
@@ -1024,9 +1033,6 @@ def avi2bigip_virtual(virtual):
     tenantName =  f5_objects.f5_sanitize(getRefName(virtual.tenant_ref))
     # List of F5 virtuals, this allows us to handle splitting
     virtuals = []
-    profiles = []
-    policies = []
-    rules = []
 
     sniParent = False
     sniChild = False
@@ -1702,7 +1708,7 @@ def main() -> int:
     
     global f5_routeDomains
     f5_routeDomains = []
-
+    
     for tenant in avi_config.Tenant:
         # Deal with mapping any Avi Tenants to different F5 Partition Names:
         tenantName = tenant.name
@@ -1753,6 +1759,17 @@ def main() -> int:
         addedToTenant = 0
         redirectVip = False
         
+        # Handle multiple VIPS on the same VsVip
+        # List of F5 virtuals, this allows us to handle splitting
+        virtualServicesUsingVsVip = getVirtualServicesOnVsVip(virtual.vsvip_ref)
+        for f5_vip in virtualServicesUsingVsVip:
+            addToList = True
+            for alreadyFoundVip in virtuals:
+                if alreadyFoundVip.name == f5_vip.name:
+                    addToList = False
+            if addToList:
+                log_warning(f"Found multiple virtual services using the same vsvip: {virtual.vsvip_ref}, on vip: {virtual.name} adding new vip {f5_vip.name}.  These MUST be migrated at the same time!")
+                virtuals.append(f5_vip)
         
         # we get one vip back, and we know what partition it goes in, so simply add it...
         #for tenant in avi_tenants:
