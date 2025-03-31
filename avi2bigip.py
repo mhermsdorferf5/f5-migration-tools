@@ -62,6 +62,7 @@ import re
 import argparse
 import logging
 import traceback
+import ipaddress
 
 
 class avi_tenant:
@@ -1086,9 +1087,24 @@ def avi2bigip_virtual(virtual):
             routeDomainID = 0
             if mask != 32:
                 log_warning(f"VsVip: {virtual.vsvip_ref} Don't know how to handle VIP with non /32 bit mask." )
+            internetVrfName = ""
+            internetVrfID = ""
             for vrf in migration_config.routeDomainMapping:
+                # Check if this VRF is default for Internet Addresses:
+                if hasattr(vrf, 'defaultForNonRFC1918'):
+                    if vrf.defaultForNonRFC1918:
+                        internetVrfName = vrf.vrfName
+                        internetVrfID = vrf.rdID
                 if vrfName == vrf.vrfName:
-                    routeDomainID = vrf.rdID
+                        routeDomainID = vrf.rdID
+            if routeDomainID == 0:
+                log_error(f"VsVip IP: {ip} No route domain found for: vrfName")
+            # If we find an "internet" VRF and the IP is not rfc1918, override the route domain:
+            if internetVrfID != "":
+                ipAddr = ipaddress.ip_address(ip)
+                if not ipAddr.is_private:
+                    routeDomainID = internetVrfID
+                    log_warning(f"VsVip IP: {ip} Is a public IP, modifying VIP route domain to: {internetVrfID} from vrf: {internetVrfName}")
             # if RD is zero let it pickup default route domain from the partition.
             if routeDomainID == 0:
                 destIpList.append(f"{ip}")

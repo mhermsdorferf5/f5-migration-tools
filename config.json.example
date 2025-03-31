@@ -2,15 +2,18 @@
   "routeDomainMapping": [
     {
       "vrfName": "FOO",
-      "rdID": 20
+      "rdID": 20,
+      "defaultForNonRFC1918": false
     },
     {
       "vrfName": "BAR",
-      "rdID": 10
+      "rdID": 10,
+      "defaultForNonRFC1918": true
     },
     {
       "vrfName": "FOOBAR",
-      "rdID": 11
+      "rdID": 11,
+      "defaultForNonRFC1918": false
     }
   ],
   "outputRegex": [

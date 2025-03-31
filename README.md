@@ -22,7 +22,7 @@ source ./.python-venv/bin/activate
 # install/upgrade pip:
 python3 -m pip install --upgrade pip
 # Install required packages/libs:
-python3 -m pip install argparse logging requests
+python3 -m pip install argparse logging requests ipaddress
 # You're now ready to run tools using:
 python3 avi2bigip.py
 ```
@@ -36,17 +36,14 @@ This was built with configruation exported from a version 22.1.6 controller.  No
 * Virtual Services:
   * VS_TYPE_NORMAL is currently supported
   * VS_TYPE_PARENT & VS_TYPE_CHILD is supported for SNI parent/child handling only.
-  * Only HTTP and L4 type VIPs currently supported.
+  * Only HTTP and L4 type VIPs are currently supported.
   * Network Security Policies are not supported, but complex rules may require intervention.
   * Analytics Profiles are not supported.
-  * HTTP Policies are not supported (no content switching)
+  * HTTP Policies are only partly supported (no content switching)
 * HTTP Profiles:
   * Content Rewrite rules/Policies are not supported.
   * Compression Policies are not supported.
-  * xff_update: not fully supported, F5 by default always appends a new XFF header to the request.
-    * If XFF replacement is required, we'll need an LTM Policy or iRule to get that functionality.
-  * xff_alternate_name: not fully supported, F5's HTTP Profiles only handle inserting xff headers with the industry standard name: X-Forwarded-For.
-    * If custom XFF header names are required, that can be done via iRule or LTM Policies.
+  * xff_alternate_name & xff_update: are supported via iRules.
   * HTTP MultiPlexing: OneConnect needs to be added to support this, and is done by the script unless multiplexing is disabled.
 * Client mTLS isn't currently supported.
 * Pools:
@@ -72,8 +69,8 @@ This was built with configruation exported from a version 22.1.6 controller.  No
 | -s \<ssl-directory> | --ssl-file-dir \<ssl-directory> | Directory where we should dump the SSL certs/keys and import script, by default it's the current workign directory |
 | -f \<log-filename> | --log-file \<log-filename> | Filename to save logs to, by default avi_bigip_for_merge.log |
 | -p | --per-tenant | Enables writing a bigip.conf file per tenant, as opposed to one large bigip.conf file |
-|  | --no-common-conf | Pevents the writing of Common configuration to the output bigip.conf file |
-|  | --no-base-conf   | Pevents the writing of Route Domain/Partition configuration to the output bigip.conf file |
+|  | --no-common-conf | Prevents the writing of Common configuration to the output bigip.conf file |
+|  | --no-base-conf   | Prevents the writing of Route Domain/Partition configuration to the output bigip.conf file |
 | -p | --per-tenant | Enables writing a bigip.conf file per tenant, as opposed to one large bigip.conf file |
 | -l | --log | Enable writing a log file in addition to writing logs to standard error/standard out. |
 | -d | --debug | Enable debug logging |
@@ -120,6 +117,8 @@ options:
 
 A configuration file is required to map Avi VRFs to F5 Route Domain IDs, additionally this gets used for mapping default route domain IDs to F5 partitions created from Avi Tenants/VRFs.  There's also a regex substitution engine on the output file, this allows you to use regex syntax to modify various aspects of the output, such as renaming a partition, or renaming virtual servers/pools, etc.  Additionally, while many TLS Cipher strings are teh came between Avi and F5, not all are.  This config can be used mapping Avi TLS cipher strings to a cipher string name supported by BIG-IP.
 
+If you set "defaultForNonRFC1918": true on one route domain, all VIPS that are NOT in rfc1918 address space will have their route domain updated to the route domain ID with defaultForNonRFC1918 set to true.
+
 ```json
 {
   "routeDomainMapping": [
@@ -133,7 +132,7 @@ A configuration file is required to map Avi VRFs to F5 Route Domain IDs, additio
     },
     {
       "vrfName": "FOOBAR",
-      "rdID": 11
+      "rdID": 11,
     }
   ],
   "outputRegex": [
