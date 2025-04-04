@@ -1777,7 +1777,10 @@ def main() -> int:
         
         # Handle multiple VIPS on the same VsVip
         # List of F5 virtuals, this allows us to handle splitting
-        virtualServicesUsingVsVip = getVirtualServicesOnVsVip(virtual.vsvip_ref)
+        if hasattr(virtual, "vsvip_ref"):
+            virtualServicesUsingVsVip = getVirtualServicesOnVsVip(virtual.vsvip_ref)
+        else:
+            virtualServicesUsingVsVip = []
         for f5_vip in virtualServicesUsingVsVip:
             addToList = True
             for alreadyFoundVip in virtuals:
