@@ -1,6 +1,7 @@
 # output files:
 *.conf
 *.conf.gz
+*.zip
 *.log
 sslFiles/
 *.pem
