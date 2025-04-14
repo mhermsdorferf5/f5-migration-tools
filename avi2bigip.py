@@ -352,6 +352,7 @@ def avi2bigip_httpPolicySet(aviHttpPolicySet):
     foundPolicyRules = 0
     if hasattr(aviHttpPolicySet, 'http_request_policy'):
         for rule in aviHttpPolicySet.http_request_policy.rules:
+            rule.name = f5_objects.f5_sanitize(rule.name)
             log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name}" )
             if rule.enable:
                 foundPolicyRules += 1
@@ -373,7 +374,51 @@ def avi2bigip_httpPolicySet(aviHttpPolicySet):
                         else:
                             log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name} has vs_port conditional but no IS_IN or IS_NOT_IN criteria" )
                             
+                    if hasattr(rule.match, 'client_ip'):
+                        f5_addrLists = []
+                        if hasattr(rule.match.client_ip, 'group_refs'):
+                            f5_firewallPolicy = f5_objects.firewallPolicy(policyName) 
+                            f5_firewallPolicy.partition = tenantName
+                            for addrGroupRef in rule.match.client_ip.group_refs:
+                                aviAddrGroup = getObjByRef(addrGroupRef)
+                                try:
+                                    f5_addrList = avi2bigip_addressList(aviAddrGroup)
+                                except Exception as e:
+                                    if args.debug:
+                                        log_error(f"Avi Address Group: Can't convert: {addrGroupRef} {str(e)} full stack: {str(traceback.format_exc())}")
+                                    else:
+                                        log_error(f"Avi Address Group: Can't convert: {addrGroupRef} {str(e)}")
+                                f5_addrLists.append(f"/{f5_addrList.partition}/{f5_addrList.name}")
+                                addObjToTenant(f5_addrList)
+                            
+                            if rule.match.client_ip.match_criteria == "IS_NOT_IN":
+                                action = "accept"
+                                status = "enabled"
+                                f5_addrListsStr = ""
+                                for addrListStr in f5_addrLists:
+                                    f5_addrListsStr += f"\n\t\t\t\t\t{addrListStr}"
+                                f5_firewallPolicy.rules.append(f"""\t\t{rule.name} {{\n\t\t\taction {action}\n\t\t\tstatus {status}\n\t\t\tip-protocol any\n\t\t\tsource {{\n\t\t\t\taddress-lists {{ {f5_addrListsStr}\n\t\t\t\t}}\n\t\t\t}}\n\t\t}}""")
+                                f5_firewallPolicy.rules.append("""
+        deny_all {
+            action reject
+            ip-protocol any
+        }""")
+                                addObjToTenant(f5_firewallPolicy)
+                                log_warning(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name} has client_ip addresses lists, created AFM policy: /{f5_firewallPolicy.partition}/{f5_firewallPolicy.name}")
+                        else:
+                            log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name} has client_ip conditional but group_refs address lists")
+                        
+                        ## Update iRule to support pool.... *maybe* create AFM policy if fairly easy to do.
+                        log_error(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name} has client_ip addresses lists, and needs to be handled manually!")
+                            
                     log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has match, set the following conditional: {conditional}")
+                            
+                if hasattr(rule, 'switching_action'):
+                    if rule.switching_action.action == "HTTP_SWITCHING_SELECT_POOL":
+                        aviPool = getObjByRef(rule.switching_action.pool_ref)
+                        bigipPool = avi2bigip_pool(aviPool)
+                        addObjToTenant(bigipPool)
+                        log_warning(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with switching_action: {rule.name} created LTM pool: /{bigipPool.partition}/{bigipPool.name}")
                             
                 if hasattr(rule, 'redirect_action'):
                     if hasattr(rule.redirect_action, 'host') or hasattr(rule.redirect_action, 'path'):
