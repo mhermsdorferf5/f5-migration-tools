@@ -92,10 +92,6 @@ class avi_tenant:
         return f"avi_tenant(name='{self.name}', defaultRouteDomain='{self.defaultRouteDomain}' description='{self.description}', \n\tf5_pools='{poolString}', \n\tf5_virtuals='{virtualString}')"
 
 
-def usage ():
-    print("Usage:")
-    print("%s --avi-json <AviConfig.json> ")
-
 def log_error(logmessage):
     logmessage = str("ERROR: " + logmessage)
     print(logmessage, file=sys.stderr)
