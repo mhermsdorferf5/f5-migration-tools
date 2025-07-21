@@ -1140,7 +1140,7 @@ def avi2bigip_virtual(virtual):
                 if vrfName == vrf.vrfName:
                         routeDomainID = vrf.rdID
             if routeDomainID == 0:
-                log_error(f"VsVip IP: {ip} No route domain found for: vrfName")
+                log_error(f"VsVip IP: {ip} No route domain found for: {vrfName}")
             # If we find an "internet" VRF and the IP is not rfc1918, override the route domain:
             if internetVrfID != "":
                 ipAddr = ipaddress.ip_address(ip)
