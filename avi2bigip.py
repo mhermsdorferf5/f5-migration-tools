@@ -1543,6 +1543,7 @@ def avi2bigip_virtual(virtual):
 
 
 def loadJsonFile(filename) -> SimpleNamespace:
+    log_debug(f"Attempting to load JSON File: {os.path.abspath(filename)}")
     file = open(filename, "r")
     jsonObj = json.loads(file.read(), object_hook=lambda d: SimpleNamespace(**d))
     file.close()
