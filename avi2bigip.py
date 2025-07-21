@@ -343,13 +343,14 @@ def avi2bigip_http_profile(aviApplicationProfile):
 def avi2bigip_httpPolicySet(aviHttpPolicySet):
     policyName =  f5_objects.f5_sanitize(aviHttpPolicySet.name)
     tenantName =  f5_objects.f5_sanitize(getRefName(aviHttpPolicySet.tenant_ref))
+    policyRef =  f"/api/httppolicyset/?tenant={tenantName}&name={aviHttpPolicySet.name}"
     irules = []
     handledPolicyRules = 0
     foundPolicyRules = 0
     if hasattr(aviHttpPolicySet, 'http_request_policy'):
         for rule in aviHttpPolicySet.http_request_policy.rules:
             rule.name = f5_objects.f5_sanitize(rule.name)
-            log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name}" )
+            log_debug(f"HTTPPolicySet: {policyRef} has httpPolicySet with http_request_policy rule: {rule.name}" )
             if rule.enable:
                 foundPolicyRules += 1
                 ruleName = rule.name
@@ -368,7 +369,7 @@ def avi2bigip_httpPolicySet(aviHttpPolicySet):
                                 for port in rule.match.vs_port.ports:
                                     conditional += f" || [TCP::local_port clientside] != {port}"
                         else:
-                            log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name} has vs_port conditional but no IS_IN or IS_NOT_IN criteria" )
+                            log_debug(f"HTTPPolicySet: {policyRef} has httpPolicySet with http_request_policy rule: {rule.name} has vs_port conditional but no IS_IN or IS_NOT_IN criteria" )
                             
                     if hasattr(rule.match, 'client_ip'):
                         f5_addrLists = []
@@ -400,26 +401,26 @@ def avi2bigip_httpPolicySet(aviHttpPolicySet):
             ip-protocol any
         }""")
                                 addObjToTenant(f5_firewallPolicy)
-                                log_warning(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name} has client_ip addresses lists, created AFM policy: /{f5_firewallPolicy.partition}/{f5_firewallPolicy.name}")
+                                log_warning(f"HTTPPolicySet: {policyRef} has httpPolicySet with http_request_policy rule: {rule.name} has client_ip addresses lists, created AFM policy: /{f5_firewallPolicy.partition}/{f5_firewallPolicy.name}")
                         else:
-                            log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name} has client_ip conditional but group_refs address lists")
+                            log_debug(f"HTTPPolicySet: {policyRef} has httpPolicySet with http_request_policy rule: {rule.name} has client_ip conditional but group_refs address lists")
                         
                         ## Update iRule to support pool.... *maybe* create AFM policy if fairly easy to do.
-                        log_error(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with http_request_policy rule: {rule.name} has client_ip addresses lists, and needs to be handled manually!")
+                        log_error(f"HTTPPolicySet: {policyRef} has httpPolicySet with http_request_policy rule: {rule.name} has client_ip addresses lists, and needs to be handled manually!")
                             
-                    log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has match, set the following conditional: {conditional}")
+                    log_debug(f"HTTPPolicySet: {policyRef} has match, set the following conditional: {conditional}")
                             
                 if hasattr(rule, 'switching_action'):
                     if rule.switching_action.action == "HTTP_SWITCHING_SELECT_POOL":
                         aviPool = getObjByRef(rule.switching_action.pool_ref)
                         bigipPool = avi2bigip_pool(aviPool)
                         addObjToTenant(bigipPool)
-                        log_warning(f"HTTPPolicySet: {aviHttpPolicySet.name} has httpPolicySet with switching_action: {rule.name} created LTM pool: /{bigipPool.partition}/{bigipPool.name}")
+                        log_warning(f"HTTPPolicySet: {policyRef} has httpPolicySet with switching_action: {rule.name} created LTM pool: /{bigipPool.partition}/{bigipPool.name}")
                             
                 if hasattr(rule, 'redirect_action'):
                     if hasattr(rule.redirect_action, 'host') or hasattr(rule.redirect_action, 'path'):
                         conditional = ""
-                        log_warning(f"HTTPPolicySet: {aviHttpPolicySet.name} has redirect action, with host/path properties, skipping.")
+                        log_warning(f"HTTPPolicySet: {policyRef} has redirect action, with host/path properties, skipping.")
                     else:
                         if rule.redirect_action.status_code == "HTTP_REDIRECT_STATUS_CODE_301":
                             if rule.redirect_action.keep_query:
@@ -432,9 +433,9 @@ def avi2bigip_httpPolicySet(aviHttpPolicySet):
                             else:
                                 redirectAction = f"HTTP::redirect {rule.redirect_action.protocol.lower()}://[getfield [HTTP::host] \":\" 1]:{rule.redirect_action.port}[HTTP::path]"
                     
-                    log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} has redirect action, set the following conditional: {redirectAction}")
+                    log_debug(f"HTTPPolicySet: {policyRef} has redirect action, set the following conditional: {redirectAction}")
                             
-                log_debug(f"HTTPPolicySet: {aviHttpPolicySet.name} conditional: {conditional} redirectAction: {redirectAction}")
+                log_debug(f"HTTPPolicySet: {policyRef} conditional: {conditional} redirectAction: {redirectAction}")
                 if conditional != "" and redirectAction != "":
                     irule = f5_objects.iRule(f"{policyName}_{ruleName}_redirect_irule")
                     if tenantName != "admin":
@@ -454,13 +455,13 @@ def avi2bigip_httpPolicySet(aviHttpPolicySet):
     if hasattr(aviHttpPolicySet, 'http_response_policy'):
         for rule in aviHttpPolicySet.http_response_policy.rules:
             foundPolicyRules += 1
-            log_debug(f"HTTPPolicySet: {policyName} has httpPolicySet with http_request_policy rule: {rule}" )
+            log_debug(f"HTTPPolicySet: {policyRef} has httpPolicySet with http_request_policy rule: {rule}" )
             
             
     if foundPolicyRules == 0:
-        log_debug(f"HTTPPolicySet: {policyName} has http_policies but policy has no rules, ignoring." )
+        log_debug(f"HTTPPolicySet: {policyRef} has http_policies but policy has no rules, ignoring." )
     if foundPolicyRules > handledPolicyRules:
-        log_error(f"HTTPPolicySet: {policyName} has {foundPolicyRules} rules but only {handledPolicyRules} rules were handled." )
+        log_error(f"HTTPPolicySet: {policyRef} has {foundPolicyRules} rules but only {handledPolicyRules} rules were handled." )
         
     return irules
 
@@ -1717,12 +1718,37 @@ def main() -> int:
         log_error("ERROR: problem loading Avi JSON Configuration. " + str(e))
         return 1
 
+    # Load Migration Config JSON File:
     global migration_config
     try:
         migration_config = loadJsonFile(args.migrationConfigFile)
     except Exception as e:
         log_error("ERROR: problem loading Migration Config JSON File. " + str(e))
         return 1
+    # Validate Migration Config JSON File:
+    if not hasattr(migration_config, 'outputRegex'):
+        log_error("ERROR: Migration Config JSON File does not have an outputRegex stanza, please add one.")
+        return 1
+    for regex in migration_config.outputRegex:
+        if not hasattr(regex, 'matchRegex') or not hasattr(regex, 'replacementRegex'):
+            log_error("ERROR: Migration Config JSON File outputRegex entry does not have matchRegex or replacementRegex, please add both.")
+            return 1
+
+    if not hasattr(migration_config, 'routeDomainMapping'):
+        log_error("ERROR: Migration Config JSON File does not have a routeDomainMapping stanza, please add one.")
+        return 1
+    for routeDomain in migration_config.routeDomainMapping:
+        if not hasattr(routeDomain, 'vrfName') or not hasattr(routeDomain, 'rdID') or not hasattr(routeDomain, 'defaultForNonRFC1918'):
+            log_error("ERROR: Migration Config JSON File routeDomainMapping entry does not have vrfName, rdID, or defaultForNonRFC1918, please add all three.")
+            return 1
+
+    if not hasattr(migration_config, 'cipherStringMapping'):
+        log_error("ERROR: Migration Config JSON File does not have an cipherStringMapping stanza, please add one.")
+        return 1
+    for cipherString in migration_config.cipherStringMapping:
+        if not hasattr(cipherString, 'aviCipher') or not hasattr(cipherString, 'f5Cipher'):
+            log_error("ERROR: Migration Config JSON File cipherStringMapping entry does not have aviCipher or f5Cipher, please add both.")
+            return 1
 
     if args.debug:
         print("DEBUGGING ENAABLED")
