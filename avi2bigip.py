@@ -1496,8 +1496,11 @@ def avi2bigip_virtual(virtual):
 
     # If we have multiple destinations and/or multiple ports, copy our vip to multiple virtuals one per destination port combo.
     for ip in destIpList:
-        rd = ip.split("%")[1]
-        ip = ip.split("%")[0]
+        if "%" in ip:
+            rd = ip.split("%")[1]
+            ip = ip.split("%")[0]
+        else:
+            rd = 0
         
         if not "255.255.255.255" in ip:
             virtualAddress = f5_objects.virtual_address(f"{ip}")
