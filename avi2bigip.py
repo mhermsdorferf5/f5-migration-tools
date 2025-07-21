@@ -1752,7 +1752,7 @@ def main() -> int:
             return 1
 
     if args.debug:
-        print("DEBUGGING ENAABLED")
+        print("DEBUGGING ENABLED")
         if args.logToFile:
             logging.basicConfig(
                 filename=args.logFile, 
@@ -1792,6 +1792,14 @@ def main() -> int:
     
     global f5_routeDomains
     f5_routeDomains = []
+   
+    # Do some basic error checking, to make sure this is a valid Avi JSON config:
+    if not hasattr(avi_config, 'Tenant'):
+        log_error("ERROR: Avi JSON Configuration does not have a Tenant stanza, this doesn't appear to be a valid Avi Config.")
+        return 1
+    if not hasattr(avi_config, 'VirtualService'):
+        log_error("ERROR: Avi JSON Configuration does not have a VirtualService stanza, this doesn't appear to be a valid Avi Config.")
+        return 1
     
     for tenant in avi_config.Tenant:
         # Deal with mapping any Avi Tenants to different F5 Partition Names:
