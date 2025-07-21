@@ -1131,16 +1131,20 @@ def avi2bigip_virtual(virtual):
                 log_warning(f"VsVip: {virtual.vsvip_ref} Don't know how to handle VIP with non /32 bit mask." )
             internetVrfName = ""
             internetVrfID = ""
+            foundVrf = 0
             for vrf in migration_config.routeDomainMapping:
                 # Check if this VRF is default for Internet Addresses:
                 if hasattr(vrf, 'defaultForNonRFC1918'):
                     if vrf.defaultForNonRFC1918:
                         internetVrfName = vrf.vrfName
                         internetVrfID = vrf.rdID
+                        foundVrf = 1
                 if vrfName == vrf.vrfName:
-                        routeDomainID = vrf.rdID
-            if routeDomainID == 0:
-                log_error(f"VsVip IP: {ip} No route domain found for: {vrfName}")
+                    routeDomainID = vrf.rdID
+                    foundVrf = 1
+            if foundVrf == 0:
+               log_error(f"VsVip IP: {ip} No route domain found for: {vrfName}")
+
             # If we find an "internet" VRF and the IP is not rfc1918, override the route domain:
             if internetVrfID != "":
                 ipAddr = ipaddress.ip_address(ip)
